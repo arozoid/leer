@@ -1,0 +1,73 @@
+name: Build LKL Artifacts
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-lkl:
+    name: build-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libelf-dev \
+            libssl-dev \
+            pahole
+
+      - name: Build LKL
+        run: |
+          make -C linux/tools/lkl -j"$(nproc)"
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # Static library (preferred)
+          cp linux/tools/lkl/liblkl.a dist/
+
+          # Shared library (best-effort)
+          if [[ -f linux/tools/lkl/lib/liblkl.so ]]; then
+            cp linux/tools/lkl/lib/liblkl.so dist/
+          fi
+
+          # Headers to consume LKL from external projects
+          mkdir -p dist/include
+          cp linux/tools/lkl/include/lkl.h dist/include/
+          cp linux/tools/lkl/include/lkl_host.h dist/include/
+          cp linux/tools/lkl/include/lkl_config.h dist/include/
+          cp linux/tools/lkl/include/lkl_autoconf.h dist/include/
+          cp -r linux/tools/lkl/include/lkl dist/include/
+
+          {
+            echo "arch=${{ matrix.arch }}"
+            echo "runner=${{ matrix.runner }}"
+            echo "commit=${GITHUB_SHA}"
+          } > dist/BUILD_INFO.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lkl-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
