@@ -21,6 +21,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Ensure LKL source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -d linux/tools/lkl ]]; then
+            echo "Using repository-provided linux/ tree"
+          else
+            echo "linux/tools/lkl not found in checkout; cloning lkl/linux..."
+            git clone --depth 1 https://github.com/lkl/linux.git linux
+          fi
+
       - name: Install build dependencies
         run: |
           sudo apt-get update
