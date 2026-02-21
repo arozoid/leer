@@ -78,10 +78,20 @@ jobs:
           fi
 
           # fs/hostfs user objects are compiled with `-include user.h` from
-          # arch/um scripts. LKL CI builds don't expose that header path by
-          # default, so provide it in a standard include location.
+          # arch/um scripts. That include is resolved relative to kernel build
+          # cwd, so stage user.h at linux/user.h.
+          if [[ ! -f linux/user.h ]]; then
+            if [[ -f linux/arch/um/include/shared/user.h ]]; then
+              cp linux/arch/um/include/shared/user.h linux/user.h
+            else
+              curl -fsSL \
+                https://raw.githubusercontent.com/lkl/linux/master/arch/um/include/shared/user.h \
+                -o linux/user.h
+            fi
+          fi
+          # Keep a copy under include/ as well for tools that include from there.
           if [[ ! -f linux/include/user.h ]]; then
-            cp linux/arch/um/include/shared/user.h linux/include/user.h
+            cp linux/user.h linux/include/user.h
           fi
 
           make -C linux/tools/lkl conf
