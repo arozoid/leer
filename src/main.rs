@@ -1,13 +1,20 @@
 use std::env;
-use std::ffi::{CStr, CString, c_char, c_int, c_long, c_ulong, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_long, c_void};
+use std::path::Path;
 use std::process::ExitCode;
 
-use libloading::Library;
+use libloading::os::unix::Library;
 
-const ROOTFS_HOST_PATH: &str = "/home/onyx/sys/debian/";
-const BASH_HOST_PATH: &str = "/home/onyx/sys/debian/usr/bin/bash";
-const LKL_SO_DEFAULT_PATH: &str = "linux/tools/lkl/lib/liblkl.so";
+const ROOTFS_HOST_PATH: &str = "/home/onyx/sys/debiarm/";
+const BASH_GUEST_PATH: &str = "/usr/bin/bash";
+const LKL_SO_DEFAULT_PATH: &str = "./liblkl.so";
 const LKL_MOUNTPOINT: &str = "/hostroot";
+const LKL_NR_MKDIRAT: c_long = 34;
+const LKL_NR_MOUNT: c_long = 40;
+const LKL_NR_CHDIR: c_long = 49;
+const LKL_NR_CHROOT: c_long = 51;
+const LKL_NR_EXECVE: c_long = 221;
+const LKL_AT_FDCWD: c_long = -100;
 
 #[repr(C)]
 struct LklHostOperations {
@@ -17,18 +24,7 @@ struct LklHostOperations {
 type LklInit = unsafe extern "C" fn(*mut LklHostOperations) -> c_int;
 type LklStartKernel = unsafe extern "C" fn(*const c_char, ...) -> c_int;
 type LklCleanup = unsafe extern "C" fn();
-type LklSysMkdir = unsafe extern "C" fn(*const c_char, c_int) -> c_long;
-type LklSysMount = unsafe extern "C" fn(
-    *const c_char,
-    *const c_char,
-    *const c_char,
-    c_ulong,
-    *const c_void,
-) -> c_long;
-type LklSysChroot = unsafe extern "C" fn(*const c_char) -> c_long;
-type LklSysChdir = unsafe extern "C" fn(*const c_char) -> c_long;
-type LklSysExecve =
-    unsafe extern "C" fn(*const c_char, *const *const c_char, *const *const c_char) -> c_long;
+type LklSyscall = unsafe extern "C" fn(c_long, *const c_long) -> c_long;
 type LklStrerror = unsafe extern "C" fn(c_int) -> *const c_char;
 
 struct LklApi {
@@ -37,11 +33,7 @@ struct LklApi {
     init: LklInit,
     start_kernel: LklStartKernel,
     cleanup: LklCleanup,
-    sys_mkdir: LklSysMkdir,
-    sys_mount: LklSysMount,
-    sys_chroot: LklSysChroot,
-    sys_chdir: LklSysChdir,
-    sys_execve: LklSysExecve,
+    syscall: LklSyscall,
     strerror: LklStrerror,
 }
 
@@ -52,10 +44,9 @@ impl LklApi {
             .map_err(|e| format!("failed to load liblkl.so from '{}': {e}", lkl_path))?;
 
         let host_ops = unsafe {
-            let raw = lib
-                .get::<u8>(b"lkl_host_ops\0")
-                .map_err(|e| format!("missing symbol lkl_host_ops: {e}"))?;
-            (&*raw as *const u8).cast::<LklHostOperations>() as *mut LklHostOperations
+            lib.get::<*mut c_void>(b"lkl_host_ops\0")
+                .map_err(|e| format!("missing symbol lkl_host_ops: {e}"))?
+                .into_raw() as *mut LklHostOperations
         };
         let init = unsafe {
             *lib.get::<LklInit>(b"lkl_init\0")
@@ -69,25 +60,9 @@ impl LklApi {
             *lib.get::<LklCleanup>(b"lkl_cleanup\0")
                 .map_err(|e| format!("missing symbol lkl_cleanup: {e}"))?
         };
-        let sys_mkdir = unsafe {
-            *lib.get::<LklSysMkdir>(b"lkl_sys_mkdir\0")
-                .map_err(|e| format!("missing symbol lkl_sys_mkdir: {e}"))?
-        };
-        let sys_mount = unsafe {
-            *lib.get::<LklSysMount>(b"lkl_sys_mount\0")
-                .map_err(|e| format!("missing symbol lkl_sys_mount: {e}"))?
-        };
-        let sys_chroot = unsafe {
-            *lib.get::<LklSysChroot>(b"lkl_sys_chroot\0")
-                .map_err(|e| format!("missing symbol lkl_sys_chroot: {e}"))?
-        };
-        let sys_chdir = unsafe {
-            *lib.get::<LklSysChdir>(b"lkl_sys_chdir\0")
-                .map_err(|e| format!("missing symbol lkl_sys_chdir: {e}"))?
-        };
-        let sys_execve = unsafe {
-            *lib.get::<LklSysExecve>(b"lkl_sys_execve\0")
-                .map_err(|e| format!("missing symbol lkl_sys_execve: {e}"))?
+        let syscall = unsafe {
+            *lib.get::<LklSyscall>(b"lkl_syscall\0")
+                .map_err(|e| format!("missing symbol lkl_syscall: {e}"))?
         };
         let strerror = unsafe {
             *lib.get::<LklStrerror>(b"lkl_strerror\0")
@@ -100,11 +75,7 @@ impl LklApi {
             init,
             start_kernel,
             cleanup,
-            sys_mkdir,
-            sys_mount,
-            sys_chroot,
-            sys_chdir,
-            sys_execve,
+            syscall,
             strerror,
         })
     }
@@ -124,6 +95,14 @@ impl LklApi {
         }
         Ok(())
     }
+
+    fn syscall(&self, no: c_long, args: &[c_long]) -> c_long {
+        let mut params = [0 as c_long; 6];
+        for (i, arg) in args.iter().enumerate().take(6) {
+            params[i] = *arg;
+        }
+        unsafe { (self.syscall)(no, params.as_ptr()) }
+    }
 }
 
 fn run() -> Result<(), String> {
@@ -135,10 +114,10 @@ fn run() -> Result<(), String> {
     let hostfs = CString::new("hostfs").map_err(|e| e.to_string())?;
     let chroot_dir = CString::new(LKL_MOUNTPOINT).map_err(|e| e.to_string())?;
     let chdir_root = CString::new("/").map_err(|e| e.to_string())?;
-    let bash = CString::new(BASH_HOST_PATH).map_err(|e| e.to_string())?;
+    let bash = CString::new(BASH_GUEST_PATH).map_err(|e| e.to_string())?;
 
     let argv = [bash.as_ptr(), std::ptr::null()];
-    let envp = [std::ptr::null()];
+    let envp: [*const c_char; 1] = [std::ptr::null()];
 
     unsafe {
         let init_ret = (api.init)(api.host_ops);
@@ -161,22 +140,47 @@ fn run() -> Result<(), String> {
         }
 
         // Create an in-kernel mountpoint and mount hostfs at /hostroot.
-        let _ = (api.sys_mkdir)(mountpoint.as_ptr(), 0o755);
-        api.ensure_ok(
-            (api.sys_mount)(
-                root_host.as_ptr(),
-                mountpoint.as_ptr(),
-                hostfs.as_ptr(),
+        let _ = api.syscall(LKL_NR_MKDIRAT, &[LKL_AT_FDCWD, mountpoint.as_ptr() as c_long, 0o755]);
+        let hostfs_ret = api.syscall(
+            LKL_NR_MOUNT,
+            &[
+                root_host.as_ptr() as c_long,
+                mountpoint.as_ptr() as c_long,
+                hostfs.as_ptr() as c_long,
                 0,
-                std::ptr::null(),
-            ),
-            "lkl_sys_mount(hostfs)",
+                std::ptr::null::<c_void>() as c_long,
+            ],
+        );
+        if hostfs_ret < 0 {
+            if hostfs_ret == -19 && Path::new(ROOTFS_HOST_PATH).is_dir() {
+                return Err(format!(
+                    "hostfs is not available in this liblkl.so (mount returned ENODEV).\n\
+                     ROOTFS_HOST_PATH points to a host directory: '{}'.\n\
+                     Rebuild liblkl with hostfs support, or use an ext4 disk image and mount it via \
+                     lkl_disk_add/lkl_mount_dev.",
+                    ROOTFS_HOST_PATH
+                ));
+            }
+            api.ensure_ok(hostfs_ret, "lkl_sys_mount(hostfs)")?;
+        }
+
+        api.ensure_ok(
+            api.syscall(LKL_NR_CHROOT, &[chroot_dir.as_ptr() as c_long]),
+            "lkl_sys_chroot",
+        )?;
+        api.ensure_ok(
+            api.syscall(LKL_NR_CHDIR, &[chdir_root.as_ptr() as c_long]),
+            "lkl_sys_chdir",
         )?;
 
-        api.ensure_ok((api.sys_chroot)(chroot_dir.as_ptr()), "lkl_sys_chroot")?;
-        api.ensure_ok((api.sys_chdir)(chdir_root.as_ptr()), "lkl_sys_chdir")?;
-
-        let exec_ret = (api.sys_execve)(bash.as_ptr(), argv.as_ptr(), envp.as_ptr());
+        let exec_ret = api.syscall(
+            LKL_NR_EXECVE,
+            &[
+                bash.as_ptr() as c_long,
+                argv.as_ptr() as c_long,
+                envp.as_ptr() as c_long,
+            ],
+        );
         if exec_ret < 0 {
             (api.cleanup)();
             return Err(format!(

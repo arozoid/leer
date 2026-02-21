@@ -2,9 +2,23 @@ name: Build LKL Artifacts
 
 on:
   push:
+  pull_request:
   workflow_dispatch:
 
 jobs:
+  rust-check:
+    name: rust-check
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo check
+        run: cargo check --locked
+
   build-lkl:
     name: build-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -46,6 +60,20 @@ jobs:
 
       - name: Build LKL
         run: |
+          set -euo pipefail
+
+          # Start from LKL defconfig, then force-enable hostfs.
+          make -C linux ARCH=lkl defconfig
+          printf "\nCONFIG_HOSTFS=y\n" >> linux/.config
+          make -C linux ARCH=lkl olddefconfig
+
+          if ! grep -q '^CONFIG_HOSTFS=y$' linux/.config; then
+            echo "CONFIG_HOSTFS was not enabled; hostfs support is required."
+            echo "Found:"
+            grep -E '^CONFIG_HOSTFS=' linux/.config || true
+            exit 1
+          fi
+
           make -C linux/tools/lkl -j"$(nproc)"
 
       - name: Collect artifacts
@@ -74,6 +102,7 @@ jobs:
             echo "arch=${{ matrix.arch }}"
             echo "runner=${{ matrix.runner }}"
             echo "commit=${GITHUB_SHA}"
+            echo "config_hostfs=$(grep -E '^CONFIG_HOSTFS=' linux/.config | cut -d= -f2 || echo missing)"
           } > dist/BUILD_INFO.txt
 
       - name: Upload artifact
