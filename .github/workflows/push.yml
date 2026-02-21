@@ -62,19 +62,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Start from LKL defconfig, then force-enable hostfs.
-          make -C linux ARCH=lkl defconfig
-          printf "\nCONFIG_HOSTFS=y\n" >> linux/.config
-          make -C linux ARCH=lkl olddefconfig
-
-          if ! grep -q '^CONFIG_HOSTFS=y$' linux/.config; then
-            echo "CONFIG_HOSTFS was not enabled; hostfs support is required."
-            echo "Found:"
-            grep -E '^CONFIG_HOSTFS=' linux/.config || true
-            exit 1
-          fi
+          # tools/lkl build regenerates linux/.config from tools/lkl/kernel.config.
+          # So inject HOSTFS in the kernel fragment that tools/lkl actually appends.
+          make -C linux/tools/lkl conf
+          printf "\nCONFIG_HOSTFS=y\n" >> linux/tools/lkl/kernel.config
 
           make -C linux/tools/lkl -j"$(nproc)"
+
+          if ! grep -q '^CONFIG_HOSTFS=y$' linux/.config; then
+            echo "CONFIG_HOSTFS was not enabled in final linux/.config."
+            echo "Found:"
+            grep -n 'HOSTFS' linux/.config || true
+            exit 1
+          fi
 
       - name: Collect artifacts
         shell: bash
