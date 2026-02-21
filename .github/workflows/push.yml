@@ -160,9 +160,25 @@ jobs:
 
           # Deploy payload: static first, shared if available
           cp linux/tools/lkl/liblkl.a dist/
-          if [[ -f linux/tools/lkl/lib/liblkl.so ]]; then
-            cp linux/tools/lkl/lib/liblkl.so dist/
-          fi
+
+          # # Shared library (best-effort)
+          # if [[ -f linux/tools/lkl/lib/liblkl.so ]]; then
+          #   cp linux/tools/lkl/lib/liblkl.so dist/
+          # fi
+
+          # # Headers to consume LKL from external projects
+          # mkdir -p dist/include
+          # cp linux/tools/lkl/include/lkl.h dist/include/
+          # cp linux/tools/lkl/include/lkl_host.h dist/include/
+          # cp linux/tools/lkl/include/lkl_config.h dist/include/
+          # cp linux/tools/lkl/include/lkl_autoconf.h dist/include/
+          # cp -r linux/tools/lkl/include/lkl dist/include/
+
+          {
+            echo "arch=${{ matrix.arch }}"
+            echo "runner=${{ matrix.runner }}"
+            echo "commit=${GITHUB_SHA}"
+          } > dist/BUILD_INFO.txt
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
