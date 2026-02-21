@@ -108,6 +108,21 @@ jobs:
           fi
 
           LKL_OUT="${GITHUB_WORKSPACE}/linux/tools/lkl"
+
+          # Ensure 9p support is compiled into the produced liblkl.a.
+          make -C linux/tools/lkl defconfig
+          if [[ ! -x linux/scripts/config ]]; then
+            echo "linux/scripts/config is missing; cannot force-enable 9p options."
+            exit 1
+          fi
+          linux/scripts/config --file linux/tools/lkl/.config \
+            -e 9P_FS \
+            -e NET_9P \
+            -e NET_9P_TCP \
+            -e NET_9P_VIRTIO \
+            -e 9P_FSCACHE
+          make -C linux/tools/lkl olddefconfig
+
           make -C linux/tools/lkl \
             CC="${MUSL_CC}" \
             HOSTCC="${MUSL_CC}" \
@@ -128,6 +143,7 @@ jobs:
             echo "arch=${{ matrix.arch }}"
             echo "runner=${{ matrix.runner }}"
             echo "commit=${GITHUB_SHA}"
+            echo "config_9p=true"
           } > dist/BUILD_INFO.txt
 
       - name: Upload artifact
