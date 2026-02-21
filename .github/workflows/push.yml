@@ -110,10 +110,17 @@ jobs:
             x86|x86_64|i386) HEADER_ARCH="x86" ;;
           esac
 
+          # hostfs user-mode code includes <generated/user_constants.h> via
+          # arch/*/um/shared/sysdep headers. Generate it from UML build rules
+          # and expose a root-level generated/ path for include resolution.
+          make -C linux ARCH=um SUBARCH="${HOST_SUBARCH}" include/generated/user_constants.h
+          ln -sfn include/generated linux/generated
+
           export USER_CFLAGS="\
             -D__UM_HOST__ \
             -D__KERNEL__ \
             -D_FILE_OFFSET_BITS=64 \
+            -I${KROOT} \
             -I${KROOT}/arch/um/include/shared \
             -I${KROOT}/arch/um/include/shared/skas \
             -I${KROOT}/arch/${HEADER_ARCH}/um/shared \
