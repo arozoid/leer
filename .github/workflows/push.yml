@@ -62,6 +62,20 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Upstream LKL arch config may not expose HOSTFS in ARCH=lkl.
+          # If missing, inject a minimal HOSTFS symbol into arch/lkl/Kconfig.
+          if ! grep -q '^config HOSTFS$' linux/arch/lkl/Kconfig; then
+            cat >> linux/arch/lkl/Kconfig <<'EOF'
+
+config HOSTFS
+	bool "Host filesystem"
+	default y
+	help
+	  Enable hostfs support so LKL can mount host directories with
+	  filesystem type "hostfs".
+EOF
+          fi
+
           # tools/lkl build regenerates linux/.config from tools/lkl/kernel.config.
           # So inject HOSTFS in the kernel fragment that tools/lkl actually appends.
           make -C linux/tools/lkl conf
