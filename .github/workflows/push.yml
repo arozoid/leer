@@ -110,9 +110,12 @@ jobs:
           LKL_OUT="${GITHUB_WORKSPACE}/linux/tools/lkl"
 
           # Ensure 9p support is compiled into the produced liblkl.a.
-          make -C linux/tools/lkl defconfig
           if [[ ! -x linux/scripts/config ]]; then
             echo "linux/scripts/config is missing; cannot force-enable 9p options."
+            exit 1
+          fi
+          if [[ ! -f linux/tools/lkl/.config ]]; then
+            echo "linux/tools/lkl/.config is missing; cannot patch LKL config."
             exit 1
           fi
           linux/scripts/config --file linux/tools/lkl/.config \
@@ -121,7 +124,12 @@ jobs:
             -e NET_9P_TCP \
             -e NET_9P_VIRTIO \
             -e 9P_FSCACHE
-          make -C linux/tools/lkl olddefconfig
+          for sym in 9P_FS NET_9P NET_9P_TCP NET_9P_VIRTIO 9P_FSCACHE; do
+            grep -q "^CONFIG_${sym}=y$" linux/tools/lkl/.config || {
+              echo "Expected CONFIG_${sym}=y in linux/tools/lkl/.config"
+              exit 1
+            }
+          done
 
           make -C linux/tools/lkl \
             CC="${MUSL_CC}" \
