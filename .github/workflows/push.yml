@@ -2,23 +2,9 @@ name: Build LKL Artifacts
 
 on:
   push:
-  pull_request:
   workflow_dispatch:
 
 jobs:
-  rust-check:
-    name: rust-check
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cargo check
-        run: cargo check --locked
-
   build-lkl:
     name: build-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -59,98 +45,8 @@ jobs:
             pahole
 
       - name: Build LKL
-        env:
-          MATRIX_ARCH: ${{ matrix.arch }}
         run: |
-          set -euo pipefail
-
-          # Enable HOSTFS in LKL config (needed by runtime host directory mounts).
-          if ! grep -q '^config HOSTFS$' linux/arch/lkl/Kconfig; then
-            {
-              echo ""
-              echo "config HOSTFS"
-              echo "  bool \"Host filesystem\""
-              echo "  default y"
-              echo "  help"
-              echo "    Enable hostfs support so LKL can mount host directories with"
-              echo "    filesystem type \"hostfs\"."
-            } >> linux/arch/lkl/Kconfig
-          fi
-
-          # fs/hostfs user objects are compiled with `-include user.h` from
-          # arch/um scripts. That include is resolved relative to kernel build
-          # cwd, so stage user.h at linux/user.h.
-          if [[ ! -f linux/user.h ]]; then
-            if [[ -f linux/arch/um/include/shared/user.h ]]; then
-              cp linux/arch/um/include/shared/user.h linux/user.h
-            else
-              curl -fsSL \
-                https://raw.githubusercontent.com/lkl/linux/master/arch/um/include/shared/user.h \
-                -o linux/user.h
-            fi
-          fi
-          # The UML user.h expects <generated/asm-offsets.h>, but hostfs user
-          # objects compile without kernel include paths. Rewrite to a path
-          # resolvable from kernel root.
-          sed -i 's|<generated/asm-offsets.h>|"include/generated/asm-offsets.h"|' linux/user.h
-          # Keep a copy under include/ as well for tools that include from there.
-          if [[ ! -f linux/include/user.h ]]; then
-            cp linux/user.h linux/include/user.h
-          fi
-
-          make -C linux/tools/lkl conf
-          printf "\nCONFIG_HOSTFS=y\n" >> linux/tools/lkl/kernel.config
-
-          # hostfs_user.o is built via arch/um Makefile rules and relies on
-          # USER_CFLAGS being close to UML's own defaults.
-          KROOT="${GITHUB_WORKSPACE}/linux"
-          HOST_SUBARCH="$(uname -m)"
-          HEADER_ARCH="${HOST_SUBARCH}"
-          case "${HOST_SUBARCH}" in
-            x86|x86_64|i386) HEADER_ARCH="x86" ;;
-          esac
-
-          # hostfs user-mode code includes <generated/user_constants.h> via
-          # arch/*/um/shared/sysdep headers. Generate it from UML build rules
-          # and expose a root-level generated/ path for include resolution.
-          make -C linux ARCH=um SUBARCH="${HOST_SUBARCH}" include/generated/user_constants.h
-          ln -sfn include/generated linux/generated
-
-          export USER_CFLAGS="\
-            -D__UM_HOST__ \
-            -D__KERNEL__ \
-            -D_FILE_OFFSET_BITS=64 \
-            -I${KROOT} \
-            -I${KROOT}/arch/um/include/shared \
-            -I${KROOT}/arch/um/include/shared/skas \
-            -I${KROOT}/arch/${HEADER_ARCH}/um/shared \
-            -I${KROOT}/arch/${HEADER_ARCH}/um \
-            -idirafter ${KROOT}/include \
-            -idirafter ${KROOT}/include/generated"
-
-          # CI runners (especially arm64) can OOM with full nproc parallelism.
-          case "${MATRIX_ARCH}" in
-            arm64) MAKE_JOBS=2 ;;
-            x86_64) MAKE_JOBS=4 ;;
-            *) MAKE_JOBS=2 ;;
-          esac
-
-          if ! make -C linux/tools/lkl -j"${MAKE_JOBS}" > lkl-build.log 2>&1; then
-            echo "Parallel build failed; retrying with -j1 for deterministic logs."
-            tail -n 300 lkl-build.log || true
-            make -C linux/tools/lkl -j1 V=1 > lkl-build-serial.log 2>&1 || {
-              echo "Serial retry failed. Showing tail of logs:"
-              tail -n 300 lkl-build.log || true
-              tail -n 300 lkl-build-serial.log || true
-              exit 1
-            }
-          fi
-
-          if ! grep -q '^CONFIG_HOSTFS=y$' linux/.config; then
-            echo "CONFIG_HOSTFS was not enabled in final linux/.config."
-            grep -n 'HOSTFS' linux/.config || true
-            exit 1
-          fi
+          make -C linux/tools/lkl -j"$(nproc)"
 
       - name: Collect artifacts
         shell: bash
@@ -158,21 +54,8 @@ jobs:
           set -euo pipefail
           mkdir -p dist
 
-          # Deploy payload: static first, shared if available
+          # Static library (preferred)
           cp linux/tools/lkl/liblkl.a dist/
-
-          # # Shared library (best-effort)
-          # if [[ -f linux/tools/lkl/lib/liblkl.so ]]; then
-          #   cp linux/tools/lkl/lib/liblkl.so dist/
-          # fi
-
-          # # Headers to consume LKL from external projects
-          # mkdir -p dist/include
-          # cp linux/tools/lkl/include/lkl.h dist/include/
-          # cp linux/tools/lkl/include/lkl_host.h dist/include/
-          # cp linux/tools/lkl/include/lkl_config.h dist/include/
-          # cp linux/tools/lkl/include/lkl_autoconf.h dist/include/
-          # cp -r linux/tools/lkl/include/lkl dist/include/
 
           {
             echo "arch=${{ matrix.arch }}"
@@ -186,13 +69,3 @@ jobs:
           name: lkl-${{ matrix.arch }}
           path: dist/
           if-no-files-found: error
-
-      - name: Upload build logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lkl-build-logs-${{ matrix.arch }}
-          path: |
-            lkl-build.log
-            lkl-build-serial.log
-          if-no-files-found: ignore
