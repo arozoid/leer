@@ -71,7 +71,16 @@ jobs:
           # musl build path may not expose mode_t/dev_t before lkl.h wrappers;
           # make sure sys/types is always visible for tools/lkl C units.
           # Also expose kernel uapi headers (e.g. linux/if_tun.h) from /usr/include.
+          GNU_MULTIARCH_DIR=""
+          case "$(uname -m)" in
+            x86_64) GNU_MULTIARCH_DIR="/usr/include/x86_64-linux-gnu" ;;
+            aarch64) GNU_MULTIARCH_DIR="/usr/include/aarch64-linux-gnu" ;;
+          esac
+
           export CFLAGS="${CFLAGS:-} -include sys/types.h -idirafter /usr/include"
+          if [[ -n "${GNU_MULTIARCH_DIR}" && -d "${GNU_MULTIARCH_DIR}" ]]; then
+            export CFLAGS="${CFLAGS} -idirafter ${GNU_MULTIARCH_DIR}"
+          fi
 
           LKL_OUT="${GITHUB_WORKSPACE}/linux/tools/lkl"
           make -C linux/tools/lkl \
