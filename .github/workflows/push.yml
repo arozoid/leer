@@ -47,18 +47,37 @@ jobs:
             pahole
 
       - name: Build LKL
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
 
           MUSL_CC=""
-          for cc in musl-gcc \
-                    x86_64-linux-musl-gcc \
-                    aarch64-linux-musl-gcc; do
-            if command -v "${cc}" >/dev/null 2>&1; then
-              MUSL_CC="${cc}"
-              break
-            fi
-          done
+          EXPECTED_ARCH=""
+          case "${MATRIX_ARCH}" in
+            x86_64)
+              EXPECTED_ARCH="x86_64"
+              for cc in x86_64-linux-musl-gcc musl-gcc; do
+                if command -v "${cc}" >/dev/null 2>&1; then
+                  MUSL_CC="${cc}"
+                  break
+                fi
+              done
+              ;;
+            arm64)
+              EXPECTED_ARCH="aarch64"
+              for cc in aarch64-linux-musl-gcc musl-gcc; do
+                if command -v "${cc}" >/dev/null 2>&1; then
+                  MUSL_CC="${cc}"
+                  break
+                fi
+              done
+              ;;
+            *)
+              echo "Unsupported matrix arch: ${MATRIX_ARCH}"
+              exit 1
+              ;;
+          esac
 
           if [[ -z "${MUSL_CC}" ]]; then
             echo "No musl compiler found on runner."
@@ -67,6 +86,12 @@ jobs:
 
           echo "Using musl compiler: ${MUSL_CC}"
           "${MUSL_CC}" --version | head -n 1 || true
+          COMPILER_MACHINE="$(${MUSL_CC} -dumpmachine || true)"
+          echo "Compiler target: ${COMPILER_MACHINE}"
+          if [[ "${COMPILER_MACHINE}" != *"${EXPECTED_ARCH}"* ]]; then
+            echo "Compiler target '${COMPILER_MACHINE}' does not match expected arch '${EXPECTED_ARCH}'."
+            exit 1
+          fi
 
           # musl build path may not expose mode_t/dev_t before lkl.h wrappers;
           # make sure sys/types is always visible for tools/lkl C units.
