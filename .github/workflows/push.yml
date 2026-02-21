@@ -59,11 +59,12 @@ jobs:
             pahole
 
       - name: Build LKL
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
 
-          # Upstream LKL arch config may not expose HOSTFS in ARCH=lkl.
-          # If missing, inject a minimal HOSTFS symbol into arch/lkl/Kconfig.
+          # Enable HOSTFS in LKL config (needed by runtime host directory mounts).
           if ! grep -q '^config HOSTFS$' linux/arch/lkl/Kconfig; then
             {
               echo ""
@@ -76,16 +77,36 @@ jobs:
             } >> linux/arch/lkl/Kconfig
           fi
 
-          # tools/lkl build regenerates linux/.config from tools/lkl/kernel.config.
-          # So inject HOSTFS in the kernel fragment that tools/lkl actually appends.
+          # fs/hostfs user objects are compiled with `-include user.h` from
+          # arch/um scripts. LKL CI builds don't expose that header path by
+          # default, so provide it in a standard include location.
+          if [[ ! -f linux/include/user.h ]]; then
+            cp linux/arch/um/include/shared/user.h linux/include/user.h
+          fi
+
           make -C linux/tools/lkl conf
           printf "\nCONFIG_HOSTFS=y\n" >> linux/tools/lkl/kernel.config
 
-          make -C linux/tools/lkl -j"$(nproc)"
+          # CI runners (especially arm64) can OOM with full nproc parallelism.
+          case "${MATRIX_ARCH}" in
+            arm64) MAKE_JOBS=2 ;;
+            x86_64) MAKE_JOBS=4 ;;
+            *) MAKE_JOBS=2 ;;
+          esac
+
+          if ! make -C linux/tools/lkl -j"${MAKE_JOBS}" > lkl-build.log 2>&1; then
+            echo "Parallel build failed; retrying with -j1 for deterministic logs."
+            tail -n 300 lkl-build.log || true
+            make -C linux/tools/lkl -j1 V=1 > lkl-build-serial.log 2>&1 || {
+              echo "Serial retry failed. Showing tail of logs:"
+              tail -n 300 lkl-build.log || true
+              tail -n 300 lkl-build-serial.log || true
+              exit 1
+            }
+          fi
 
           if ! grep -q '^CONFIG_HOSTFS=y$' linux/.config; then
             echo "CONFIG_HOSTFS was not enabled in final linux/.config."
-            echo "Found:"
             grep -n 'HOSTFS' linux/.config || true
             exit 1
           fi
@@ -96,8 +117,11 @@ jobs:
           set -euo pipefail
           mkdir -p dist
 
-          # Deploy payload: shared library only
-          cp linux/tools/lkl/lib/liblkl.so dist/
+          # Deploy payload: static first, shared if available
+          cp linux/tools/lkl/liblkl.a dist/
+          if [[ -f linux/tools/lkl/lib/liblkl.so ]]; then
+            cp linux/tools/lkl/lib/liblkl.so dist/
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -105,3 +129,13 @@ jobs:
           name: lkl-${{ matrix.arch }}
           path: dist/
           if-no-files-found: error
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lkl-build-logs-${{ matrix.arch }}
+          path: |
+            lkl-build.log
+            lkl-build-serial.log
+          if-no-files-found: ignore
