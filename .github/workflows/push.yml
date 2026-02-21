@@ -114,19 +114,32 @@ jobs:
             echo "linux/scripts/config is missing; cannot force-enable 9p options."
             exit 1
           fi
-          if [[ ! -f linux/tools/lkl/.config ]]; then
-            echo "linux/tools/lkl/.config is missing; cannot patch LKL config."
+          CONFIG_FILE=""
+          if [[ -f linux/tools/lkl/.config ]]; then
+            CONFIG_FILE="linux/tools/lkl/.config"
+          elif [[ -f linux/arch/lkl/configs/defconfig ]]; then
+            CONFIG_FILE="linux/arch/lkl/configs/defconfig"
+          elif [[ -f linux/.config ]]; then
+            CONFIG_FILE="linux/.config"
+          else
+            echo "No known LKL config file found. Tried:"
+            echo "  - linux/tools/lkl/.config"
+            echo "  - linux/arch/lkl/configs/defconfig"
+            echo "  - linux/.config"
+            echo "Available nearby config files:"
+            find linux -maxdepth 5 -type f -name '*config*' | head -n 200 || true
             exit 1
           fi
-          linux/scripts/config --file linux/tools/lkl/.config \
+          echo "Patching config file: ${CONFIG_FILE}"
+          linux/scripts/config --file "${CONFIG_FILE}" \
             -e 9P_FS \
             -e NET_9P \
             -e NET_9P_TCP \
             -e NET_9P_VIRTIO \
             -e 9P_FSCACHE
           for sym in 9P_FS NET_9P NET_9P_TCP NET_9P_VIRTIO 9P_FSCACHE; do
-            grep -q "^CONFIG_${sym}=y$" linux/tools/lkl/.config || {
-              echo "Expected CONFIG_${sym}=y in linux/tools/lkl/.config"
+            grep -q "^CONFIG_${sym}=y$" "${CONFIG_FILE}" || {
+              echo "Expected CONFIG_${sym}=y in ${CONFIG_FILE}"
               exit 1
             }
           done
