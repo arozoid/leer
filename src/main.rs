@@ -1,15 +1,41 @@
-use std::env;
-use std::ffi::{CStr, CString, c_char, c_int, c_long};
+use std::ffi::{CStr, CString, c_char, c_int, c_long, c_ulong, c_void};
 use std::process::ExitCode;
 
-const LKL_ROOTFS_DEFAULT: &str = "/";
-const LKL_INIT_DEFAULT: &str = "/usr/bin/bash";
+use clap::Parser;
+
+const LKL_MOUNTPOINT: &str = "/__host_rootfs";
+const LKL_HOSTFS_TYPE: &str = "hostfs";
+
+#[derive(Parser, Debug)]
+#[command(author, version, about = "Boot LKL and run a command from a host rootfs folder")]
+struct Cli {
+    /// Host folder containing a Linux rootfs tree (e.g. ./debian-rootfs)
+    #[arg(long = "rootfs-dir")]
+    rootfs_dir: String,
+
+    /// Command to execute inside LKL after chroot (path is inside the rootfs)
+    #[arg(long = "command", default_value = "/usr/bin/bash")]
+    command: String,
+
+    /// Kernel command line passed to lkl_start_kernel
+    #[arg(long = "cmdline", default_value = "mem=1024M loglevel=4")]
+    cmdline: String,
+}
+
 unsafe extern "C" {
     static mut lkl_host_ops: u8;
 
     fn lkl_init(ops: *mut u8) -> c_int;
     fn lkl_start_kernel(cmd: *const c_char, ...) -> c_int;
     fn lkl_cleanup();
+    fn lkl_sys_mkdir(path: *const c_char, mode: c_int) -> c_long;
+    fn lkl_sys_mount(
+        src: *const c_char,
+        target: *const c_char,
+        fstype: *const c_char,
+        flags: c_ulong,
+        data: *const c_void,
+    ) -> c_long;
     fn lkl_sys_chroot(path: *const c_char) -> c_long;
     fn lkl_sys_chdir(path: *const c_char) -> c_long;
     fn lkl_sys_execve(
@@ -36,21 +62,15 @@ fn ensure_ok(ret: c_long, op: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn run() -> Result<(), String> {
-    // Rootfs is expected to already exist inside LKL (e.g. initramfs or mounted block device).
-    // Example:
-    //   LKL_ROOTFS=/ LKL_INIT=/usr/bin/bash cargo run
-    //   LKL_ROOTFS=/mnt/rootfs LKL_INIT=/bin/sh cargo run
-    let lkl_cmdline = env::var("LKL_CMDLINE").unwrap_or_else(|_| "mem=1024M loglevel=4".to_string());
-    let rootfs = env::var("LKL_ROOTFS").unwrap_or_else(|_| LKL_ROOTFS_DEFAULT.to_string());
-    let init_cmd = env::var("LKL_INIT").unwrap_or_else(|_| LKL_INIT_DEFAULT.to_string());
-
-    let cmdline = CString::new(lkl_cmdline).map_err(|e| e.to_string())?;
-    let chroot_dir = CString::new(rootfs).map_err(|e| e.to_string())?;
+fn run(cli: Cli) -> Result<(), String> {
+    let cmdline = CString::new(cli.cmdline).map_err(|e| e.to_string())?;
+    let rootfs_dir = CString::new(cli.rootfs_dir).map_err(|e| e.to_string())?;
+    let mountpoint = CString::new(LKL_MOUNTPOINT).map_err(|e| e.to_string())?;
+    let hostfs = CString::new(LKL_HOSTFS_TYPE).map_err(|e| e.to_string())?;
     let chdir_root = CString::new("/").map_err(|e| e.to_string())?;
-    let init = CString::new(init_cmd).map_err(|e| e.to_string())?;
+    let init_cmd = CString::new(cli.command).map_err(|e| e.to_string())?;
 
-    let argv = [init.as_ptr(), std::ptr::null()];
+    let argv = [init_cmd.as_ptr(), std::ptr::null()];
     let envp = [std::ptr::null()];
 
     unsafe {
@@ -73,10 +93,23 @@ fn run() -> Result<(), String> {
             ));
         }
 
-        ensure_ok(lkl_sys_chroot(chroot_dir.as_ptr()), "lkl_sys_chroot")?;
+        // Mount host rootfs folder inside LKL then chroot into it.
+        let _ = lkl_sys_mkdir(mountpoint.as_ptr(), 0o755);
+        ensure_ok(
+            lkl_sys_mount(
+                rootfs_dir.as_ptr(),
+                mountpoint.as_ptr(),
+                hostfs.as_ptr(),
+                0,
+                std::ptr::null(),
+            ),
+            "lkl_sys_mount(hostfs)",
+        )?;
+
+        ensure_ok(lkl_sys_chroot(mountpoint.as_ptr()), "lkl_sys_chroot")?;
         ensure_ok(lkl_sys_chdir(chdir_root.as_ptr()), "lkl_sys_chdir")?;
 
-        let exec_ret = lkl_sys_execve(init.as_ptr(), argv.as_ptr(), envp.as_ptr());
+        let exec_ret = lkl_sys_execve(init_cmd.as_ptr(), argv.as_ptr(), envp.as_ptr());
         if exec_ret < 0 {
             lkl_cleanup();
             return Err(format!(
@@ -91,7 +124,9 @@ fn run() -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    let cli = Cli::parse();
+
+    match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e}");

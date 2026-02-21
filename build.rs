@@ -1,7 +1,7 @@
 use std::env;
 
 fn main() {
-    let lkl_dir = env::var("LKL_DIR").unwrap_or_else(|_| "linux/tools/lkl".to_string());
+    let lkl_dir = env::var("LKL_DIR").unwrap_or_else(|_| ".".to_string());
 
     println!("cargo:rustc-link-search=native={}", lkl_dir);
     println!("cargo:rustc-link-search=native={}/lib", lkl_dir);
