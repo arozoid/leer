@@ -67,6 +67,10 @@ jobs:
           echo "Using musl compiler: ${MUSL_CC}"
           "${MUSL_CC}" --version | head -n 1 || true
 
+          # musl build path may not expose mode_t/dev_t before lkl.h wrappers;
+          # make sure sys/types is always visible for tools/lkl C units.
+          export CFLAGS="${CFLAGS:-} -include sys/types.h"
+
           LKL_OUT="${GITHUB_WORKSPACE}/linux/tools/lkl"
           make -C linux/tools/lkl \
             CC="${MUSL_CC}" \
