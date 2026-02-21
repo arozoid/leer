@@ -89,6 +89,10 @@ jobs:
                 -o linux/user.h
             fi
           fi
+          # The UML user.h expects <generated/asm-offsets.h>, but hostfs user
+          # objects compile without kernel include paths. Rewrite to a path
+          # resolvable from kernel root.
+          sed -i 's|<generated/asm-offsets.h>|"include/generated/asm-offsets.h"|' linux/user.h
           # Keep a copy under include/ as well for tools that include from there.
           if [[ ! -f linux/include/user.h ]]; then
             cp linux/user.h linux/include/user.h
