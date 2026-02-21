@@ -42,11 +42,36 @@ jobs:
             flex \
             libelf-dev \
             libssl-dev \
+            musl-tools \
             pahole
 
       - name: Build LKL
         run: |
-          make -C linux/tools/lkl -j"$(nproc)"
+          set -euo pipefail
+
+          MUSL_CC=""
+          for cc in musl-gcc \
+                    x86_64-linux-musl-gcc \
+                    aarch64-linux-musl-gcc; do
+            if command -v "${cc}" >/dev/null 2>&1; then
+              MUSL_CC="${cc}"
+              break
+            fi
+          done
+
+          if [[ -z "${MUSL_CC}" ]]; then
+            echo "No musl compiler found on runner."
+            exit 1
+          fi
+
+          echo "Using musl compiler: ${MUSL_CC}"
+          "${MUSL_CC}" --version | head -n 1 || true
+
+          make -C linux/tools/lkl \
+            CC="${MUSL_CC}" \
+            HOSTCC="${MUSL_CC}" \
+            HOSTLD="${MUSL_CC}" \
+            -j"$(nproc)"
 
       - name: Collect artifacts
         shell: bash
