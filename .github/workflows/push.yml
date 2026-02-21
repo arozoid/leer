@@ -65,15 +65,15 @@ jobs:
           # Upstream LKL arch config may not expose HOSTFS in ARCH=lkl.
           # If missing, inject a minimal HOSTFS symbol into arch/lkl/Kconfig.
           if ! grep -q '^config HOSTFS$' linux/arch/lkl/Kconfig; then
-            cat >> linux/arch/lkl/Kconfig <<'EOF'
-
-config HOSTFS
-	bool "Host filesystem"
-	default y
-	help
-	  Enable hostfs support so LKL can mount host directories with
-	  filesystem type "hostfs".
-EOF
+            {
+              echo ""
+              echo "config HOSTFS"
+              echo "  bool \"Host filesystem\""
+              echo "  default y"
+              echo "  help"
+              echo "    Enable hostfs support so LKL can mount host directories with"
+              echo "    filesystem type \"hostfs\"."
+            } >> linux/arch/lkl/Kconfig
           fi
 
           # tools/lkl build regenerates linux/.config from tools/lkl/kernel.config.
@@ -96,28 +96,8 @@ EOF
           set -euo pipefail
           mkdir -p dist
 
-          # Static library (preferred)
-          cp linux/tools/lkl/liblkl.a dist/
-
-          # Shared library (best-effort)
-          if [[ -f linux/tools/lkl/lib/liblkl.so ]]; then
-            cp linux/tools/lkl/lib/liblkl.so dist/
-          fi
-
-          # Headers to consume LKL from external projects
-          mkdir -p dist/include
-          cp linux/tools/lkl/include/lkl.h dist/include/
-          cp linux/tools/lkl/include/lkl_host.h dist/include/
-          cp linux/tools/lkl/include/lkl_config.h dist/include/
-          cp linux/tools/lkl/include/lkl_autoconf.h dist/include/
-          cp -r linux/tools/lkl/include/lkl dist/include/
-
-          {
-            echo "arch=${{ matrix.arch }}"
-            echo "runner=${{ matrix.runner }}"
-            echo "commit=${GITHUB_SHA}"
-            echo "config_hostfs=$(grep -E '^CONFIG_HOSTFS=' linux/.config | cut -d= -f2 || echo missing)"
-          } > dist/BUILD_INFO.txt
+          # Deploy payload: shared library only
+          cp linux/tools/lkl/lib/liblkl.so dist/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
