@@ -101,6 +101,18 @@ jobs:
           make -C linux/tools/lkl conf
           printf "\nCONFIG_HOSTFS=y\n" >> linux/tools/lkl/kernel.config
 
+          # hostfs_user.o is built via arch/um Makefile rules and relies on
+          # USER_CFLAGS for user-mode headers/types.
+          KROOT="${GITHUB_WORKSPACE}/linux"
+          export USER_CFLAGS="\
+            -D__UM_HOST__ \
+            -I${KROOT}/include \
+            -I${KROOT}/include/generated \
+            -I${KROOT}/arch/um/include \
+            -I${KROOT}/arch/um/include/shared \
+            -I${KROOT}/arch/lkl/include \
+            -I${KROOT}/arch/lkl/include/generated"
+
           # CI runners (especially arm64) can OOM with full nproc parallelism.
           case "${MATRIX_ARCH}" in
             arm64) MAKE_JOBS=2 ;;
