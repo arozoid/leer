@@ -111,7 +111,9 @@ jobs:
             -I${KROOT}/arch/um/include \
             -I${KROOT}/arch/um/include/shared \
             -I${KROOT}/arch/lkl/include \
-            -I${KROOT}/arch/lkl/include/generated"
+            -I${KROOT}/arch/lkl/include/generated \
+            -I${KROOT}/arch/lkl/include/uapi \
+            -I${KROOT}/arch/lkl/include/generated/uapi"
 
           # CI runners (especially arm64) can OOM with full nproc parallelism.
           case "${MATRIX_ARCH}" in
