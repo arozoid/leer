@@ -42,6 +42,7 @@ jobs:
             flex \
             libelf-dev \
             libssl-dev \
+            linux-libc-dev \
             musl-tools \
             pahole
 
@@ -69,7 +70,8 @@ jobs:
 
           # musl build path may not expose mode_t/dev_t before lkl.h wrappers;
           # make sure sys/types is always visible for tools/lkl C units.
-          export CFLAGS="${CFLAGS:-} -include sys/types.h"
+          # Also expose kernel uapi headers (e.g. linux/if_tun.h) from /usr/include.
+          export CFLAGS="${CFLAGS:-} -include sys/types.h -idirafter /usr/include"
 
           LKL_OUT="${GITHUB_WORKSPACE}/linux/tools/lkl"
           make -C linux/tools/lkl \
