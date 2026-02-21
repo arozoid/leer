@@ -71,7 +71,8 @@ jobs:
             CC="${MUSL_CC}" \
             HOSTCC="${MUSL_CC}" \
             HOSTLD="${MUSL_CC}" \
-            -j"$(nproc)"
+            -j"$(nproc)" \
+            liblkl.a
 
       - name: Collect artifacts
         shell: bash
