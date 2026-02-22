@@ -1,0 +1,4 @@
+arch=x86_64
+runner=ubuntu-24.04
+commit=8bfb5ecf78b02f7d57511f0da55e46bb043f8014
+config_9p=true

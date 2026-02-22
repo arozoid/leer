@@ -43,7 +43,6 @@ jobs:
             libelf-dev \
             libssl-dev \
             linux-libc-dev \
-            musl-tools \
             pahole
 
       - name: Build LKL
@@ -52,23 +51,23 @@ jobs:
         run: |
           set -euo pipefail
 
-          MUSL_CC=""
+          TARGET_CC=""
           EXPECTED_ARCH=""
           case "${MATRIX_ARCH}" in
             x86_64)
               EXPECTED_ARCH="x86_64"
-              for cc in x86_64-linux-musl-gcc musl-gcc; do
+              for cc in x86_64-linux-gnu-gcc gcc; do
                 if command -v "${cc}" >/dev/null 2>&1; then
-                  MUSL_CC="${cc}"
+                  TARGET_CC="${cc}"
                   break
                 fi
               done
               ;;
             arm64)
               EXPECTED_ARCH="aarch64"
-              for cc in aarch64-linux-musl-gcc musl-gcc; do
+              for cc in aarch64-linux-gnu-gcc gcc; do
                 if command -v "${cc}" >/dev/null 2>&1; then
-                  MUSL_CC="${cc}"
+                  TARGET_CC="${cc}"
                   break
                 fi
               done
@@ -79,30 +78,28 @@ jobs:
               ;;
           esac
 
-          if [[ -z "${MUSL_CC}" ]]; then
-            echo "No musl compiler found on runner."
+          if [[ -z "${TARGET_CC}" ]]; then
+            echo "No suitable glibc compiler found on runner."
             exit 1
           fi
 
-          echo "Using musl compiler: ${MUSL_CC}"
-          "${MUSL_CC}" --version | head -n 1 || true
-          COMPILER_MACHINE="$(${MUSL_CC} -dumpmachine || true)"
+          echo "Using compiler: ${TARGET_CC}"
+          "${TARGET_CC}" --version | head -n 1 || true
+          COMPILER_MACHINE="$(${TARGET_CC} -dumpmachine || true)"
           echo "Compiler target: ${COMPILER_MACHINE}"
           if [[ "${COMPILER_MACHINE}" != *"${EXPECTED_ARCH}"* ]]; then
             echo "Compiler target '${COMPILER_MACHINE}' does not match expected arch '${EXPECTED_ARCH}'."
             exit 1
           fi
 
-          # musl build path may not expose mode_t/dev_t before lkl.h wrappers;
-          # make sure sys/types is always visible for tools/lkl C units.
-          # Also expose kernel uapi headers (e.g. linux/if_tun.h) from /usr/include.
+          # Expose kernel uapi headers (e.g. linux/if_tun.h) from /usr/include.
           GNU_MULTIARCH_DIR=""
           case "$(uname -m)" in
             x86_64) GNU_MULTIARCH_DIR="/usr/include/x86_64-linux-gnu" ;;
             aarch64) GNU_MULTIARCH_DIR="/usr/include/aarch64-linux-gnu" ;;
           esac
 
-          export CFLAGS="${CFLAGS:-} -include sys/types.h -idirafter /usr/include"
+          export CFLAGS="${CFLAGS:-} -idirafter /usr/include"
           if [[ -n "${GNU_MULTIARCH_DIR}" && -d "${GNU_MULTIARCH_DIR}" ]]; then
             export CFLAGS="${CFLAGS} -idirafter ${GNU_MULTIARCH_DIR}"
           fi
@@ -134,10 +131,17 @@ jobs:
           linux/scripts/config --file "${CONFIG_FILE}" \
             -e 9P_FS \
             -e NET_9P \
+            -e NET_9P_FD \
             -e NET_9P_TCP \
             -e NET_9P_VIRTIO \
-            -e 9P_FSCACHE
-          for sym in 9P_FS NET_9P NET_9P_TCP NET_9P_VIRTIO 9P_FSCACHE; do
+            -e 9P_FSCACHE \
+            -e NFS_FS \
+            -e NFS_V2 \
+            -e NFS_V3 \
+            -e NFS_V4 \
+            -e SUNRPC \
+            -e LOCKD
+          for sym in 9P_FS NET_9P NET_9P_FD NET_9P_TCP NET_9P_VIRTIO 9P_FSCACHE NFS_FS NFS_V2 NFS_V3 NFS_V4 SUNRPC LOCKD; do
             grep -q "^CONFIG_${sym}=y$" "${CONFIG_FILE}" || {
               echo "Expected CONFIG_${sym}=y in ${CONFIG_FILE}"
               exit 1
@@ -145,9 +149,9 @@ jobs:
           done
 
           make -C linux/tools/lkl \
-            CC="${MUSL_CC}" \
-            HOSTCC="${MUSL_CC}" \
-            HOSTLD="${MUSL_CC}" \
+            CC="${TARGET_CC}" \
+            HOSTCC="${TARGET_CC}" \
+            HOSTLD="${TARGET_CC}" \
             -j"$(nproc)" \
             "${LKL_OUT}/liblkl.a"
 
