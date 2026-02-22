@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString, c_char, c_int, c_long, c_ulong, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_long, c_void};
 use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "LKL runtime with 9p mount and rootfs boot modes")]
+#[command(author, version, about = "LKL runtime with virtio-fs and rootfs image boot modes")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -15,41 +15,21 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Start kernel and mount a 9p rootfs over TAP+TCP
-    Fs9p(Fs9pArgs),
+    /// Start kernel and mount a virtio-fs rootfs
+    Virtiofs(VirtiofsArgs),
     /// Start kernel from a rootfs image
     Rootfs(RootfsArgs),
 }
 
 #[derive(Args, Debug)]
-struct Fs9pArgs {
-    /// External 9p server endpoint host:port
-    #[arg(long = "addr")]
-    addr: String,
+struct VirtiofsArgs {
+    /// Virtio-fs tag name
+    #[arg(long = "tag")]
+    tag: String,
 
-    /// 9p aname
-    #[arg(long = "aname", default_value = "/")]
-    aname: String,
-
-    /// 9p uname
-    #[arg(long = "uname", default_value = "root")]
-    uname: String,
-
-    /// 9p msize
-    #[arg(long = "msize", default_value_t = 262_144)]
-    msize: u32,
-
-    /// Host TAP device for LKL netdev (must exist and be accessible)
-    #[arg(long = "lkl-tap-ifname")]
-    lkl_tap_ifname: String,
-
-    /// IPv4 for LKL netdev in CIDR
-    #[arg(long = "lkl-ipv4", default_value = "10.0.2.15/24")]
-    lkl_ipv4: String,
-
-    /// Optional IPv4 gateway for LKL
-    #[arg(long = "lkl-gateway")]
-    lkl_gateway: Option<String>,
+    /// Mount options passed to virtiofs (optional)
+    #[arg(long = "mount-opts")]
+    mount_opts: Option<String>,
 
     /// Command to execute inside mounted rootfs
     #[arg(long = "command", default_value = "/usr/bin/bash")]
@@ -136,14 +116,6 @@ unsafe extern "C" {
 
     fn lkl_mount_fs(fstype: *const c_char) -> c_int;
 
-    fn lkl_netdev_tap_create(ifname: *const c_char, offload: c_int) -> *mut c_void;
-    fn lkl_netdev_add(nd: *mut c_void, args: *const c_void) -> c_int;
-    fn lkl_netdev_get_ifindex(id: c_int) -> c_int;
-    fn lkl_if_up(ifindex: c_int) -> c_int;
-    fn lkl_if_set_ipv4(ifindex: c_int, addr: u32, netmask_len: u32) -> c_int;
-    fn lkl_if_set_ipv4_gateway(ifindex: c_int, addr: u32) -> c_int;
-    fn lkl_set_ipv4_gateway(addr: u32) -> c_int;
-
     fn lkl_disk_add(disk: *mut LklDisk) -> c_int;
     fn lkl_mount_dev(
         disk_id: u32,
@@ -174,7 +146,7 @@ unsafe fn lkl_sys_mount(
     src: *const c_char,
     target: *const c_char,
     fstype: *const c_char,
-    flags: c_ulong,
+    flags: c_long,
     data: *const c_void,
 ) -> c_long {
     unsafe {
@@ -183,7 +155,7 @@ unsafe fn lkl_sys_mount(
             src as usize as c_long,
             target as usize as c_long,
             fstype as usize as c_long,
-            flags as c_long,
+            flags,
             data as usize as c_long,
             0,
         )
@@ -251,42 +223,6 @@ fn ensure_ok(ret: c_long, op: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_host_port(addr: &str) -> Result<(&str, u16), String> {
-    let (host, port_str) = addr
-        .rsplit_once(':')
-        .ok_or_else(|| "address must be in host:port format".to_string())?;
-    if host.is_empty() {
-        return Err("address host cannot be empty".to_string());
-    }
-    let port = port_str
-        .parse::<u16>()
-        .map_err(|_| "address has invalid port".to_string())?;
-    Ok((host, port))
-}
-
-fn parse_ipv4_cidr(s: &str) -> Result<(u32, u32), String> {
-    let (ip_s, prefix_s) = s
-        .split_once('/')
-        .ok_or_else(|| "--lkl-ipv4 must be in A.B.C.D/prefix form".to_string())?;
-    let ip: std::net::Ipv4Addr = ip_s
-        .parse()
-        .map_err(|_| "--lkl-ipv4 has invalid IPv4 address".to_string())?;
-    let prefix: u32 = prefix_s
-        .parse()
-        .map_err(|_| "--lkl-ipv4 has invalid prefix".to_string())?;
-    if prefix > 32 {
-        return Err("--lkl-ipv4 prefix must be <= 32".to_string());
-    }
-    Ok((u32::from_be_bytes(ip.octets()), prefix))
-}
-
-fn parse_ipv4_u32(s: &str, flag: &str) -> Result<u32, String> {
-    let ip: std::net::Ipv4Addr = s
-        .parse()
-        .map_err(|_| format!("{flag} has invalid IPv4 address"))?;
-    Ok(u32::from_be_bytes(ip.octets()))
-}
-
 fn detect_sysnrs() -> Result<&'static SysNrs, String> {
     let p1 = CString::new("/__abi_probe_x64").map_err(|e| e.to_string())?;
     let p2 = CString::new("/__abi_probe_generic").map_err(|e| e.to_string())?;
@@ -351,105 +287,17 @@ fn exec_inside_root(sysnrs: &SysNrs, command: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn mount_9p_tcp(
-    sysnrs: &SysNrs,
-    host: &str,
-    port: u16,
-    args: &Fs9pArgs,
-    mountpoint: &CString,
-    fs_9p: &CString,
-    last_err: &mut c_long,
-    last_src: &mut String,
-    last_opts: &mut String,
-    attempt_errors: &mut Vec<String>,
-) -> Result<bool, String> {
-    let src = CString::new(host).map_err(|e| e.to_string())?;
-    let variants = [
-        format!(
-            "trans=tcp,port={port},msize={},version=9p2000.L,uname={},aname={},access=any,cache=none",
-            args.msize, args.uname, args.aname
-        ),
-        format!(
-            "trans=tcp,port={port},msize={},version=9p2000,uname={},aname={},access=any,cache=none",
-            args.msize, args.uname, args.aname
-        ),
-        format!(
-            "trans=tcp,port={port},version=9p2000.L,uname={},access=any,cache=none",
-            args.uname
-        ),
-    ];
-    for opts in variants {
-        let data = CString::new(opts.clone()).map_err(|e| e.to_string())?;
-        let ret = unsafe {
-            lkl_sys_mount(
-                sysnrs,
-                src.as_ptr(),
-                mountpoint.as_ptr(),
-                fs_9p.as_ptr(),
-                0,
-                data.as_ptr() as *const c_void,
-            )
-        };
-        if ret >= 0 {
-            return Ok(true);
-        }
-        *last_err = ret;
-        *last_src = host.to_string();
-        *last_opts = opts;
-        attempt_errors.push(format!("src='{host}' err={ret} opts='{last_opts}'"));
-    }
-    Ok(false)
-}
-
-fn setup_lkl_ipv4(ifindex: c_int, args: &Fs9pArgs, last_err: c_long) -> Result<(), String> {
-    let up = unsafe { lkl_if_up(ifindex) };
-    if up < 0 {
-        return Err(format!(
-            "9p tap setup failed after previous error {} ({last_err}); lkl_if_up failed: {} ({up})",
-            err_text(last_err),
-            err_text(up as c_long)
-        ));
-    }
-
-    let (addr, prefix) = parse_ipv4_cidr(&args.lkl_ipv4)?;
-    let ip_ret = unsafe { lkl_if_set_ipv4(ifindex, addr, prefix) };
-    if ip_ret < 0 {
-        return Err(format!(
-            "9p tap setup failed after previous error {} ({last_err}); lkl_if_set_ipv4 failed: {} ({ip_ret})",
-            err_text(last_err),
-            err_text(ip_ret as c_long)
-        ));
-    }
-
-    if let Some(gw) = args.lkl_gateway.as_deref() {
-        let gw_addr = parse_ipv4_u32(gw, "--lkl-gateway")?;
-        let gw_ret = unsafe { lkl_if_set_ipv4_gateway(ifindex, gw_addr) };
-        let gw_ret = if gw_ret < 0 {
-            unsafe { lkl_set_ipv4_gateway(gw_addr) }
-        } else {
-            gw_ret
-        };
-        if gw_ret < 0 {
-            return Err(format!(
-                "9p tap setup failed after previous error {} ({last_err}); lkl_set_ipv4_gateway failed: {} ({gw_ret})",
-                err_text(last_err),
-                err_text(gw_ret as c_long)
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn run_fs9p(args: Fs9pArgs) -> Result<(), String> {
-    let (host, port) = parse_host_port(&args.addr)?;
-
+fn run_virtiofs(args: VirtiofsArgs) -> Result<(), String> {
     boot_kernel(&args.cmdline)?;
 
     let sysnrs = detect_sysnrs()?;
 
     let mountpoint = CString::new(LKL_MOUNTPOINT).map_err(|e| e.to_string())?;
-    let fs_9p = CString::new("9p").map_err(|e| e.to_string())?;
+    let fs_virtio = CString::new("virtiofs").map_err(|e| e.to_string())?;
     let chdir_root = CString::new("/").map_err(|e| e.to_string())?;
+    let src = CString::new(args.tag.as_str()).map_err(|e| e.to_string())?;
+    let opts = args.mount_opts.unwrap_or_default();
+    let opts_c = CString::new(opts.clone()).map_err(|e| e.to_string())?;
 
     let mk_ret = unsafe { lkl_sys_mkdir(sysnrs, mountpoint.as_ptr(), 0o755) };
     if mk_ret < 0 && mk_ret != -17 {
@@ -459,51 +307,26 @@ fn run_fs9p(args: Fs9pArgs) -> Result<(), String> {
         ));
     }
 
-    let c_tap = CString::new(args.lkl_tap_ifname.as_str()).map_err(|e| e.to_string())?;
-    let nd = unsafe { lkl_netdev_tap_create(c_tap.as_ptr(), 0) };
-    if nd.is_null() {
+    let ret = unsafe {
+        lkl_sys_mount(
+            sysnrs,
+            src.as_ptr(),
+            mountpoint.as_ptr(),
+            fs_virtio.as_ptr(),
+            0,
+            if opts.is_empty() {
+                std::ptr::null()
+            } else {
+                opts_c.as_ptr() as *const c_void
+            },
+        )
+    };
+    if ret < 0 {
         return Err(format!(
-            "lkl_netdev_tap_create({}) failed. Ensure TAP exists and is accessible.",
-            args.lkl_tap_ifname
-        ));
-    }
-    let netdev_id = unsafe { lkl_netdev_add(nd, std::ptr::null()) };
-    if netdev_id < 0 {
-        return Err(format!(
-            "lkl_netdev_add(tap) failed: {} ({netdev_id})",
-            err_text(netdev_id as c_long)
-        ));
-    }
-    let ifindex = unsafe { lkl_netdev_get_ifindex(netdev_id) };
-    if ifindex < 0 {
-        return Err(format!(
-            "lkl_netdev_get_ifindex(tap) failed: {} ({ifindex})",
-            err_text(ifindex as c_long)
-        ));
-    }
-
-    let mut last_err = 0;
-    let mut last_src = String::new();
-    let mut last_opts = String::new();
-    let mut attempt_errors: Vec<String> = Vec::new();
-    setup_lkl_ipv4(ifindex, &args, last_err)?;
-    let mounted = mount_9p_tcp(
-        sysnrs,
-        host,
-        port,
-        &args,
-        &mountpoint,
-        &fs_9p,
-        &mut last_err,
-        &mut last_src,
-        &mut last_opts,
-        &mut attempt_errors,
-    )?;
-
-    if !mounted {
-        return Err(format!(
-            "lkl_sys_mount(9p tcp over tap) failed: {} ({last_err}); last src='{last_src}' opts='{last_opts}'; attempts: {}",
-            err_text(last_err), attempt_errors.join(" | ")
+            "lkl_sys_mount(virtiofs) failed: {} ({ret}); tag='{}' opts='{}'. Ensure liblkl is built with virtio-fs support and a matching virtio-fs device/tag is provided.",
+            err_text(ret),
+            args.tag,
+            opts
         ));
     }
 
@@ -588,7 +411,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Fs9p(args) => run_fs9p(args),
+        Commands::Virtiofs(args) => run_virtiofs(args),
         Commands::Rootfs(args) => run_rootfs(args),
     };
 
