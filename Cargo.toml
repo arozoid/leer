@@ -6,3 +6,11 @@ build = "build.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+libc = "0.2.182"
+shell-words = "1.1.1"
+# Keep these aligned with virtiofsd's stack to avoid vm-memory trait/version mismatches
+vhost-user-backend = "0.17.0"
+virtio-bindings = "0.2.7"
+virtio-queue = "0.14.0"
+virtiofsd = { version = "1.13.3", default-features = false }
+vm-memory = "0.16.2"
