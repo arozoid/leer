@@ -1,7 +1,7 @@
 use crate::cli::ImageArgs;
 use crate::host::{
     apply_bind_mounts, apply_guest_identity, apply_recommended_mounts, parse_bind_specs,
-    select_root_profile,
+    parse_change_id_spec, select_root_profile,
 };
 use crate::lkl::{
     LklDisk, boot_kernel, ensure_ok, err_text, exec_preflight_mmap, join_mount_opts,
@@ -91,14 +91,11 @@ pub(crate) fn run_image(args: ImageArgs) -> Result<(), String> {
         apply_recommended_mounts(sysnrs)?;
     }
     apply_bind_mounts(sysnrs, &bind_specs)?;
-    apply_guest_identity(
-        sysnrs,
-        args.root_id || profile.force_root_id,
-        args.change_id,
-    )?;
     unsafe {
         ensure_ok(lkl_sys_chdir(sysnrs, chdir_work.as_ptr()), "lkl_sys_chdir")?;
     }
+    let change_id = parse_change_id_spec(args.change_id.as_deref())?;
+    apply_guest_identity(sysnrs, args.root_id || profile.force_root_id, change_id)?;
 
     let (command, command_args) = split_commandline(&args.command)?;
 
@@ -115,5 +112,7 @@ pub(crate) fn run_image(args: ImageArgs) -> Result<(), String> {
         None,
         None,
         args.forward_verbose,
+        args.root_id || profile.force_root_id,
+        None,
     )
 }

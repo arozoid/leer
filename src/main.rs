@@ -48,12 +48,12 @@ pub mod cli {
         pub bind: Vec<String>,
 
         /// Force root identity (uid 0, gid 0) inside the guest
-        #[arg(long = "root-id", default_value_t = false)]
+        #[arg(short = '0', long = "root-id", default_value_t = false)]
         pub root_id: bool,
 
-        /// Change identity to match the host user inside the guest
-        #[arg(long = "change-id", default_value_t = false)]
-        pub change_id: bool,
+        /// Change identity to explicit uid:gid inside the guest
+        #[arg(long = "change-id", value_name = "UID:GID")]
+        pub change_id: Option<String>,
 
         /// Syscall names/numbers to forward (advanced)
         #[arg(long = "forward-syscall")]
@@ -107,12 +107,12 @@ pub mod cli {
         pub bind: Vec<String>,
 
         /// Force root identity (uid 0, gid 0) inside the guest
-        #[arg(long = "root-id", default_value_t = false)]
+        #[arg(short = '0', long = "root-id", default_value_t = false)]
         pub root_id: bool,
 
-        /// Change identity to match the host user inside the guest
-        #[arg(long = "change-id", default_value_t = false)]
-        pub change_id: bool,
+        /// Change identity to explicit uid:gid inside the guest
+        #[arg(long = "change-id", value_name = "UID:GID")]
+        pub change_id: Option<String>,
 
         /// Syscall names/numbers to forward (advanced)
         #[arg(long = "forward-syscall")]

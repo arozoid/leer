@@ -21,7 +21,7 @@ use crate::lkl::{
 use crate::seccomp;
 use crate::syscall::{
     SysNrs, detect_sysnrs, lkl_sys_chdir, lkl_sys_chroot, lkl_sys_mkdir, lkl_sys_mount,
-    lkl_sys_setfsgid, lkl_sys_setgroups, lkl_sys_setresgid, lkl_sys_setresuid,
+    lkl_sys_setfsgid, lkl_sys_setresgid, lkl_sys_setresuid,
 };
 
 const LKL_MOUNTPOINT: &str = "/__host_rootfs";
@@ -498,55 +498,49 @@ pub(crate) fn apply_bind_mounts(sysnrs: &SysNrs, binds: &[BindSpec]) -> Result<(
     Ok(())
 }
 
-fn host_groups() -> Result<Vec<libc::gid_t>, String> {
-    let n = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
-    if n < 0 {
-        return Err(format!(
-            "getgroups(size) failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    if n == 0 {
-        return Ok(Vec::new());
-    }
-    let mut groups = vec![0 as libc::gid_t; n as usize];
-    let got = unsafe { libc::getgroups(n, groups.as_mut_ptr()) };
-    if got < 0 {
-        return Err(format!(
-            "getgroups(values) failed: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    groups.truncate(got as usize);
-    Ok(groups)
+pub(crate) fn parse_change_id_spec(spec: Option<&str>) -> Result<Option<(c_long, c_long)>, String> {
+    let Some(spec) = spec else {
+        return Ok(None);
+    };
+    let (uid_s, gid_s) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("invalid --change-id '{spec}', expected UID:GID"))?;
+    let uid: c_long = uid_s
+        .parse::<u32>()
+        .map_err(|e| format!("invalid --change-id uid '{uid_s}': {e}"))?
+        as c_long;
+    let gid: c_long = gid_s
+        .parse::<u32>()
+        .map_err(|e| format!("invalid --change-id gid '{gid_s}': {e}"))?
+        as c_long;
+    Ok(Some((uid, gid)))
 }
 
-pub(crate) fn apply_guest_identity(sysnrs: &SysNrs, root_id: bool, change_id: bool) -> Result<(), String> {
-    if root_id && change_id {
+pub(crate) fn apply_guest_identity(
+    sysnrs: &SysNrs,
+    root_id: bool,
+    change_id: Option<(c_long, c_long)>,
+) -> Result<(), String> {
+    if root_id && change_id.is_some() {
         return Err(String::from(
             "`--root-id` and `--change-id` are mutually exclusive",
         ));
     }
-    if !root_id && !change_id {
+    if !root_id && change_id.is_none() {
         return Ok(());
     }
 
     let (uid, gid, groups): (c_long, c_long, Vec<libc::gid_t>) = if root_id {
         (0, 0, vec![0 as libc::gid_t])
     } else {
-        let uid = unsafe { libc::getuid() } as c_long;
-        let gid = unsafe { libc::getgid() } as c_long;
-        let groups = host_groups()?;
+        let (uid, gid) = change_id.expect("checked above");
+        let groups = vec![gid as libc::gid_t];
         (uid, gid, groups)
     };
 
-    let grp_ptr = if groups.is_empty() {
-        std::ptr::null()
-    } else {
-        groups.as_ptr()
-    };
-    let set_groups = unsafe { lkl_sys_setgroups(sysnrs, groups.len() as c_long, grp_ptr) };
-    ensure_ok(set_groups, "lkl_sys_setgroups")?;
+    // Avoid LKL setgroups credential mutation. Group identity exposed to child
+    // process is handled via seccomp get* overrides.
+    let _ = groups;
 
     let set_gid = unsafe { lkl_sys_setresgid(sysnrs, gid, gid, gid) };
     ensure_ok(set_gid, "lkl_sys_setresgid")?;
@@ -1286,7 +1280,6 @@ pub(crate) fn run_host(args: HostArgs) -> Result<(), String> {
         apply_recommended_mounts(sysnrs)?;
     }
     apply_bind_mounts(sysnrs, &bind_specs)?;
-    apply_guest_identity(sysnrs, args.root_id || force_root_id, args.change_id)?;
 
     unsafe {
         ensure_ok(
@@ -1294,6 +1287,11 @@ pub(crate) fn run_host(args: HostArgs) -> Result<(), String> {
             "lkl_sys_chdir",
         )?;
     }
+    let change_id = parse_change_id_spec(args.change_id.as_deref())?;
+    if args.root_id || force_root_id {
+        apply_guest_identity(sysnrs, true, None)?;
+    }
+    let id_override = change_id.map(|(uid, gid)| (uid as libc::uid_t, gid as libc::gid_t));
 
     let (guest_cmd, guest_cmd_args) = split_commandline(&args.command)?;
 
@@ -1311,5 +1309,7 @@ pub(crate) fn run_host(args: HostArgs) -> Result<(), String> {
         Some(root_dir.as_path()),
         Some(host_workdir.as_path()),
         args.forward_verbose,
+        args.root_id || force_root_id,
+        id_override,
     )
 }

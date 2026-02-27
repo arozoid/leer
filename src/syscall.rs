@@ -4,6 +4,9 @@ use crate::lkl::lkl_syscall6;
 
 pub(crate) struct SysNrs {
     chdir: c_long,
+    fchdir: c_long,
+    getcwd: c_long,
+    execve: c_long,
     getuid: c_long,
     geteuid: c_long,
     getresuid: c_long,
@@ -51,6 +54,9 @@ pub(crate) struct SysNrs {
 
 pub(crate) const SYSNRS_X86_64: SysNrs = SysNrs {
     chdir: 80,
+    fchdir: 81,
+    getcwd: 79,
+    execve: 59,
     getuid: 102,
     geteuid: 107,
     getresuid: 118,
@@ -98,6 +104,9 @@ pub(crate) const SYSNRS_X86_64: SysNrs = SysNrs {
 
 pub(crate) const SYSNRS_GENERIC: SysNrs = SysNrs {
     chdir: 49,
+    fchdir: 50,
+    getcwd: 17,
+    execve: 221,
     getuid: 174,
     geteuid: 175,
     getresuid: 148,
@@ -240,6 +249,33 @@ pub(crate) unsafe fn lkl_sys_chroot(sys: &SysNrs, path: *const c_char) -> c_long
 
 pub(crate) unsafe fn lkl_sys_chdir(sys: &SysNrs, path: *const c_char) -> c_long {
     unsafe { lkl_syscall6(sys.chdir, path as usize as c_long, 0, 0, 0, 0, 0) }
+}
+
+pub(crate) unsafe fn lkl_sys_fchdir(sys: &SysNrs, fd: c_long) -> c_long {
+    unsafe { lkl_syscall6(sys.fchdir, fd, 0, 0, 0, 0, 0) }
+}
+
+pub(crate) unsafe fn lkl_sys_getcwd(sys: &SysNrs, buf: *mut c_char, size: c_long) -> c_long {
+    unsafe { lkl_syscall6(sys.getcwd, buf as usize as c_long, size, 0, 0, 0, 0) }
+}
+
+pub(crate) unsafe fn lkl_sys_execve(
+    sys: &SysNrs,
+    path: *const c_char,
+    argv: *const *const c_char,
+    envp: *const *const c_char,
+) -> c_long {
+    unsafe {
+        lkl_syscall6(
+            sys.execve,
+            path as usize as c_long,
+            argv as usize as c_long,
+            envp as usize as c_long,
+            0,
+            0,
+            0,
+        )
+    }
 }
 
 pub(crate) unsafe fn lkl_sys_getuid(sys: &SysNrs) -> c_long {
