@@ -2596,6 +2596,126 @@ fn notify_addfd(
     Ok(ret as libc::c_long)
 }
 
+fn setup_ld_library_path(root: &Path) {
+    use std::fs;
+    
+    let mut ld_lib_paths = vec![];
+    
+    // Standard library paths to check (relative to root)
+    let standard_paths = vec![
+        "lib64",
+        "lib",
+        "lib/x86_64-linux-gnu",
+        "usr/lib64", 
+        "usr/lib",
+        "usr/lib/x86_64-linux-gnu",
+        "usr/local/lib",
+        "usr/libexec",
+        "usr/libexec/sudo",
+        "usr/libexec/coreutils",
+    ];
+    
+    for lib_dir in standard_paths {
+        let lib_path = root.join(lib_dir);
+        if lib_path.exists() && lib_path.is_dir() {
+            ld_lib_paths.push(lib_path.to_string_lossy().into_owned());
+        }
+    }
+    
+    // Also recursively check for other multiarch lib directories
+    for base_dir in &["usr/lib", "lib"] {
+        if let Ok(entries) = fs::read_dir(root.join(base_dir)) {
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if metadata.is_dir() {
+                        let path = entry.path();
+                        if let Some(file_name) = path.file_name() {
+                            let name = file_name.to_string_lossy();
+                            // Add any multiarch directories we haven't added yet
+                            if (name.contains("x86_64") || name.contains("linux-gnu") 
+                                || name.contains("aarch64") || name.contains("arm")) 
+                                && !name.starts_with("x86_64-linux-gnu") 
+                                && !name.starts_with("aarch64-linux-gnu") {
+                                let path_str = path.to_string_lossy().into_owned();
+                                if !ld_lib_paths.contains(&path_str) {
+                                    ld_lib_paths.push(path_str);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if !ld_lib_paths.is_empty() {
+        let ld_library_path = ld_lib_paths.join(":");
+        if let Ok(ld_lib_c) = CString::new(ld_library_path) {
+            let _ = unsafe { libc::setenv(c"LD_LIBRARY_PATH".as_ptr(), ld_lib_c.as_ptr(), 1) };
+        }
+    }
+}
+
+fn build_rpath_from_binary(binary_path: &Path, root: &Path) -> Option<String> {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    
+    let mut file = std::fs::File::open(binary_path).ok()?;
+    let mut buf = [0u8; 4096];
+    let n = file.read(&mut buf).ok()?;
+    
+    // Parse ELF header
+    if n < 64 {
+        return None;
+    }
+    
+    // Check ELF magic
+    if &buf[0..4] != b"\x7FELF" {
+        return None;
+    }
+    
+    // Get architecture flag (byte 4: 1=32-bit, 2=64-bit)
+    let is_64bit = buf[4] == 2;
+    if !is_64bit {
+        return None;
+    }
+    
+    // Get endianness (byte 5: 1=little, 2=big)
+    let is_little_endian = buf[5] == 1;
+    if !is_little_endian {
+        return None;
+    }
+    
+    // Parse program header offset (offset 32, 8 bytes for 64-bit)
+    let ph_offset = u64::from_le_bytes(buf[32..40].try_into().ok()?) as usize;
+    let ph_entsize = u16::from_le_bytes(buf[54..56].try_into().ok()?) as usize;
+    let ph_num = u16::from_le_bytes(buf[56..58].try_into().ok()?) as usize;
+    
+    // Look for DYNAMIC segment (PT_DYNAMIC = 2)
+    let mut dynamic_offset = None;
+    let mut dynamic_size = None;
+    
+    for i in 0..ph_num {
+        let ph_addr = ph_offset + i * ph_entsize;
+        if ph_addr + 56 > n {
+            break;
+        }
+        
+        let p_type = u32::from_le_bytes(buf[ph_addr..ph_addr+4].try_into().ok()?);
+        if p_type == 2 { // PT_DYNAMIC
+            let p_offset = u64::from_le_bytes(buf[ph_addr+8..ph_addr+16].try_into().ok()?) as usize;
+            let p_filesz = u64::from_le_bytes(buf[ph_addr+32..ph_addr+40].try_into().ok()?) as usize;
+            dynamic_offset = Some(p_offset);
+            dynamic_size = Some(p_filesz);
+            break;
+        }
+    }
+    
+    // For now, return None as parsing full ELF and extracting RUNPATH is complex
+    // The setenv approach with LD_LIBRARY_PATH should handle most cases
+    None
+}
+
 fn prepare_exec_target(
     command: &str,
     args: &[String],
@@ -2609,12 +2729,29 @@ fn prepare_exec_target(
     let Some(root) = host_root else {
         return (exec_path, argv);
     };
+    
     let cmd_path = Path::new(command);
-    if !cmd_path.starts_with(root) {
+    
+    // If command is an absolute path without root prefix, redirect it to rootfs
+    if cmd_path.is_absolute() && !cmd_path.starts_with(root) {
+        let redirected = root.join(command.trim_start_matches('/'));
+        if redirected.exists() {
+            exec_path = redirected.to_string_lossy().into_owned();
+            argv[0] = exec_path.clone();
+        }
+    }
+    
+    if !cmd_path.starts_with(root) && !Path::new(&exec_path).starts_with(root) {
         return (exec_path, argv);
     }
 
-    let mut file = match std::fs::File::open(cmd_path) {
+    let actual_path = if Path::new(&exec_path).starts_with(root) {
+        Path::new(&exec_path)
+    } else {
+        cmd_path
+    };
+
+    let mut file = match std::fs::File::open(actual_path) {
         Ok(f) => f,
         Err(_) => return (exec_path, argv),
     };
@@ -2634,7 +2771,7 @@ fn prepare_exec_target(
         return (exec_path, argv);
     }
 
-    let guest_command = cmd_path
+    let guest_command = actual_path
         .strip_prefix(root)
         .ok()
         .map(|rel| {
@@ -2917,6 +3054,9 @@ fn spawn_seccomp_exec_child(
                         1,
                     )
                 };
+                
+                // Setup LD_LIBRARY_PATH to include all lib directories in rootfs
+                setup_ld_library_path(root);
             }
             if let Some(dir) = workdir {
                 let dir_c =
