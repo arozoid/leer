@@ -13,7 +13,7 @@ use crate::syscall::{
     lkl_sys_mkdir, lkl_sys_mkdirat, lkl_sys_mount, lkl_sys_newfstatat, lkl_sys_openat,
     lkl_sys_openat2, lkl_sys_pread64, lkl_sys_read, lkl_sys_renameat2, lkl_sys_setfsgid,
     lkl_sys_setgid, lkl_sys_setgroups, lkl_sys_setregid, lkl_sys_setresgid, lkl_sys_setresuid,
-    lkl_sys_setreuid, lkl_sys_setuid, lkl_sys_socket, lkl_sys_umount2, lkl_sys_unlinkat, lkl_sys_write,
+    lkl_sys_setreuid, lkl_sys_setuid, lkl_sys_socket, lkl_sys_statx, lkl_sys_umount2, lkl_sys_unlinkat, lkl_sys_write,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -49,6 +49,8 @@ const HOST_NR_CHOWN: i32 = 92;
 const HOST_NR_FSTAT: i32 = 5;
 #[cfg(target_arch = "x86_64")]
 const HOST_NR_NEWFSTATAT: i32 = 262;
+#[cfg(target_arch = "x86_64")]
+const HOST_NR_STATX: i32 = 332;
 #[cfg(target_arch = "x86_64")]
 const HOST_NR_FACCESSAT2: i32 = 439;
 #[cfg(target_arch = "x86_64")]
@@ -174,6 +176,8 @@ const HOST_NR_CHOWN: i32 = -1;
 const HOST_NR_FSTAT: i32 = 80;
 #[cfg(target_arch = "aarch64")]
 const HOST_NR_NEWFSTATAT: i32 = 79;
+#[cfg(target_arch = "aarch64")]
+const HOST_NR_STATX: i32 = 291;
 #[cfg(target_arch = "aarch64")]
 const HOST_NR_FACCESSAT2: i32 = 439;
 #[cfg(target_arch = "aarch64")]
@@ -358,8 +362,40 @@ fn normalized_permissions(path: &CStr) -> Option<(libc::mode_t, libc::uid_t, lib
     if path_str == "/etc/passwd" {
         return Some((0o644, 0, 0));
     }
-    if path_str == "/etc/shadow" {
-        return Some((0o640, 0, 42)); // root:shadow
+    if path_str == "/etc/shadow" || path_str == "/etc/gshadow" {
+        return Some((0o640, 0, 0)); // root:root
+    }
+    
+    // /var directory structure
+    if path_str == "/var" || path_str == "/var/lib" || path_str == "/var/cache" || 
+       path_str == "/var/log" || path_str == "/var/run" || path_str == "/var/spool" ||
+       path_str == "/var/tmp" || path_str == "/var/www" || path_str == "/var/mail" ||
+       path_str.starts_with("/var/lib/") || path_str.starts_with("/var/cache/") ||
+       path_str.starts_with("/var/log/") || path_str.starts_with("/var/spool/") ||
+       path_str.starts_with("/var/www/") || path_str.starts_with("/var/mail/") {
+        return Some((0o755, 0, 0));
+    }
+    
+    // /usr directory structure  
+    if path_str == "/usr" || path_str == "/usr/local" || path_str == "/usr/lib" ||
+       path_str == "/usr/lib64" || path_str == "/usr/share" || path_str == "/usr/include" ||
+       path_str == "/usr/src" || path_str.starts_with("/usr/lib/") || 
+       path_str.starts_with("/usr/share/") || path_str.starts_with("/usr/include/") ||
+       path_str.starts_with("/usr/src/") || path_str.starts_with("/usr/local/") {
+        return Some((0o755, 0, 0));
+    }
+    
+    // /lib directories
+    if path_str == "/lib" || path_str == "/lib64" || path_str == "/lib32" ||
+       path_str == "/libx32" || path_str.starts_with("/lib/") || path_str.starts_with("/lib64/") ||
+       path_str.starts_with("/lib32/") || path_str.starts_with("/libx32/") {
+        return Some((0o755, 0, 0));
+    }
+    
+    // /etc/apt and dpkg directories
+    if path_str == "/etc/apt" || path_str == "/etc/dpkg" || path_str.starts_with("/etc/apt/") ||
+       path_str.starts_with("/etc/dpkg/") || path_str.starts_with("/etc/alternatives/") {
+        return Some((0o755, 0, 0));
     }
     
     // /dev special files
@@ -462,6 +498,8 @@ fn syscall_name_from_nr(nr: i32) -> &'static str {
         "fstat"
     } else if nr == HOST_NR_NEWFSTATAT {
         "newfstatat"
+    } else if nr == HOST_NR_STATX {
+        "statx"
     } else if nr == HOST_NR_FACCESSAT2 {
         "faccessat2"
     } else if nr == HOST_NR_GETDENTS64 {
@@ -1242,6 +1280,72 @@ fn forward_newfstatat(
         )
     };
     if let Err(errno) = process_vm_write_exact(pid, remote_stat, stat_bytes) {
+        return seccomp_errno_reply(errno);
+    }
+    seccomp_value_reply(0)
+}
+
+fn forward_statx(
+    req: &libc::seccomp_notif,
+    sysnrs: &SysNrs,
+    table: &ForwardFdTable,
+    host_root: Option<&Path>,
+    normalize: bool,
+) -> SeccompDispatch {
+    let pid = req.pid as libc::pid_t;
+    let dirfd_raw = to_dirfd_arg(req.data.args[0]);
+    let path = match read_remote_c_string(pid, req.data.args[1], FORWARD_MAX_PATH_LEN) {
+        Ok(v) => v,
+        Err(errno) => return seccomp_errno_reply(errno),
+    };
+    let path = match translate_path_for_lkl(pid, path.as_c_str(), host_root) {
+        Ok(v) => v,
+        Err(errno) => return seccomp_errno_reply(errno),
+    };
+    let lkl_dirfd = match resolve_open_dirfd(path.as_c_str(), dirfd_raw, table) {
+        Some(v) => v,
+        None => return SeccompDispatch::Continue,
+    };
+    let flags = to_c_long_arg(req.data.args[2]) as libc::c_int;
+    let mask = to_c_long_arg(req.data.args[3]) as libc::c_uint;
+    let remote_statx = req.data.args[4];
+    if remote_statx == 0 {
+        return seccomp_errno_reply(libc::EFAULT);
+    }
+    
+    // Allocate buffer for statx struct (0x100 bytes is typically enough)
+    let mut statx_buf = vec![0u8; 0x100];
+    let ret = unsafe {
+        lkl_sys_statx(
+            sysnrs,
+            lkl_dirfd,
+            path.as_ptr(),
+            flags,
+            mask,
+            statx_buf.as_mut_ptr() as *mut c_void,
+        )
+    };
+    if ret < 0 {
+        return seccomp_errno_reply((-ret) as i32);
+    }
+    
+    // Apply normalization if enabled
+    if normalize {
+        if let Some((mode, uid, gid)) = normalized_permissions(path.as_c_str()) {
+            // statx struct layout: stx_mode at offset 0x20, stx_uid at 0x48, stx_gid at 0x4c
+            // These offsets may vary by architecture, but are standard on x86_64
+            if statx_buf.len() >= 0x50 {
+                let mode_le = mode as u16;
+                statx_buf[0x20..0x22].copy_from_slice(&mode_le.to_le_bytes());
+                let uid_le = uid as u32;
+                statx_buf[0x48..0x4c].copy_from_slice(&uid_le.to_le_bytes());
+                let gid_le = gid as u32;
+                statx_buf[0x4c..0x50].copy_from_slice(&gid_le.to_le_bytes());
+            }
+        }
+    }
+    
+    if let Err(errno) = process_vm_write_exact(pid, remote_statx, &statx_buf) {
         return seccomp_errno_reply(errno);
     }
     seccomp_value_reply(0)
@@ -2399,6 +2503,7 @@ fn dispatch_forward_syscall(
         HOST_NR_OPENAT2 => forward_openat2(req, sysnrs, table, host_root, listener_fd),
         HOST_NR_FSTAT => forward_fstat(req, sysnrs, table, normalize),
         HOST_NR_NEWFSTATAT => forward_newfstatat(req, sysnrs, table, host_root, normalize),
+        HOST_NR_STATX => forward_statx(req, sysnrs, table, host_root, normalize),
         HOST_NR_FACCESSAT2 => forward_faccessat2(req, sysnrs, table, host_root),
         HOST_NR_GETDENTS64 => forward_getdents64(req, sysnrs, table),
         HOST_NR_GETDENTS => forward_getdents(req, sysnrs, table),

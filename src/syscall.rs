@@ -7,6 +7,8 @@ pub(crate) struct SysNrs {
     fchdir: c_long,
     getcwd: c_long,
     execve: c_long,
+    exit: c_long,
+    wait4: c_long,
     getuid: c_long,
     geteuid: c_long,
     getresuid: c_long,
@@ -51,6 +53,7 @@ pub(crate) struct SysNrs {
     fchownat: c_long,
     mmap: c_long,
     munmap: c_long,
+    statx: c_long,
 }
 
 pub(crate) const SYSNRS_X86_64: SysNrs = SysNrs {
@@ -58,6 +61,8 @@ pub(crate) const SYSNRS_X86_64: SysNrs = SysNrs {
     fchdir: 81,
     getcwd: 79,
     execve: 59,
+    exit: 60,
+    wait4: 61,
     getuid: 102,
     geteuid: 107,
     getresuid: 118,
@@ -102,6 +107,7 @@ pub(crate) const SYSNRS_X86_64: SysNrs = SysNrs {
     fchownat: 260,
     mmap: 9,
     munmap: 11,
+    statx: 332,
 };
 
 pub(crate) const SYSNRS_GENERIC: SysNrs = SysNrs {
@@ -109,6 +115,8 @@ pub(crate) const SYSNRS_GENERIC: SysNrs = SysNrs {
     fchdir: 50,
     getcwd: 17,
     execve: 221,
+    exit: 93,
+    wait4: 260,
     getuid: 174,
     geteuid: 175,
     getresuid: 148,
@@ -153,6 +161,7 @@ pub(crate) const SYSNRS_GENERIC: SysNrs = SysNrs {
     fchownat: 54,
     mmap: 222,
     munmap: 215,
+    statx: 291,
 };
 
 pub(crate) const AT_FDCWD_LINUX: c_long = -100;
@@ -285,6 +294,51 @@ pub(crate) unsafe fn lkl_sys_execve(
             envp as usize as c_long,
             0,
             0,
+            0,
+        )
+    }
+}
+
+pub(crate) unsafe fn lkl_sys_exit(sys: &SysNrs, status: c_int) -> c_long {
+    unsafe { lkl_syscall6(sys.exit, status as c_long, 0, 0, 0, 0, 0) }
+}
+
+pub(crate) unsafe fn lkl_sys_wait4(
+    sys: &SysNrs,
+    pid: c_long,
+    wstatus: *mut c_int,
+    options: c_long,
+    rusage: *mut c_void,
+) -> c_long {
+    unsafe {
+        lkl_syscall6(
+            sys.wait4,
+            pid,
+            wstatus as usize as c_long,
+            options,
+            rusage as usize as c_long,
+            0,
+            0,
+        )
+    }
+}
+
+pub(crate) unsafe fn lkl_sys_statx(
+    sys: &SysNrs,
+    dirfd: c_long,
+    pathname: *const c_char,
+    flags: c_int,
+    mask: libc::c_uint,
+    statxbuf: *mut c_void,
+) -> c_long {
+    unsafe {
+        lkl_syscall6(
+            sys.statx,
+            dirfd,
+            pathname as usize as c_long,
+            flags as c_long,
+            mask as c_long,
+            statxbuf as usize as c_long,
             0,
         )
     }

@@ -1,5 +1,7 @@
-use std::ffi::{CString, c_int, c_long, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_long, c_void};
 use std::fs;
+use std::fs::OpenOptions;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::{LazyLock, Mutex};
@@ -13,10 +15,11 @@ use virtiofsd::server::Server as VirtioFsServer;
 use vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemoryMmap};
 
 use crate::cli::HostArgs;
+use crate::ext4img;
 use crate::lkl::{
-    boot_kernel, ensure_ok, err_text, exec_preflight_mmap, join_mount_opts,
-    resolve_guest_command_on_host, split_commandline, virtio_dev_cleanup, virtio_dev_setup,
-    virtio_req_complete,
+    LklDisk, boot_kernel, ensure_ok, err_text, exec_preflight_mmap, join_mount_opts,
+    lkl_dev_blk_ops, lkl_disk_add, lkl_mount_dev, resolve_guest_command_on_host, split_commandline,
+    virtio_dev_cleanup, virtio_dev_setup, virtio_req_complete,
 };
 use crate::seccomp;
 use crate::syscall::{
@@ -1189,6 +1192,7 @@ impl Drop for InprocVirtioFsFrontend {
     }
 }
 
+/// Run host subcommand with optional ext4 image conversion
 pub(crate) fn run_host(args: HostArgs) -> Result<(), String> {
     let profile = select_root_profile(
         args.root_dir.as_ref(),
@@ -1216,6 +1220,25 @@ pub(crate) fn run_host(args: HostArgs) -> Result<(), String> {
             profile.root_path.display()
         )
     })?;
+
+    // Determine if we should use ext4 image mode
+    let use_ext4_img = args.ext4;
+
+    if use_ext4_img {
+        // Convert directory to ext4 image and use virtio-blk
+        run_host_with_ext4_img(args, profile, root_dir)
+    } else {
+        // Use virtio-fs directly
+        run_host_with_virtiofs(args, profile, root_dir)
+    }
+}
+
+/// Run host subcommand using virtio-fs (original behavior)
+fn run_host_with_virtiofs(
+    args: HostArgs,
+    profile: RootProfile,
+    root_dir: PathBuf,
+) -> Result<(), String> {
     let bind_specs = parse_bind_specs_with_root(&args.bind, Some(&root_dir))?;
     let force_root_id = profile.force_root_id;
     let (host_workdir, guest_workdir) = resolve_host_workdir(&root_dir, args.work_dir.as_deref())?;
@@ -1302,6 +1325,10 @@ pub(crate) fn run_host(args: HostArgs) -> Result<(), String> {
 
     let host_cmd =
         resolve_guest_command_on_host(&guest_cmd, Some(root_dir.as_path())).unwrap_or(guest_cmd);
+    
+    // When using virtio-fs, enable normalization by default if requested
+    let normalize = args.normalize || profile.recommended || profile.force_root_id;
+    
     seccomp::run_seccomp_forward_to_lkl(
         sysnrs,
         &host_cmd,
@@ -1312,6 +1339,135 @@ pub(crate) fn run_host(args: HostArgs) -> Result<(), String> {
         args.forward_verbose,
         args.root_id || force_root_id,
         id_override,
-        args.normalize,
+        normalize,
+    )
+}
+
+/// Run host subcommand using ext4 image (real Unix semantics via virtio-blk)
+fn run_host_with_ext4_img(
+    args: HostArgs,
+    profile: RootProfile,
+    root_dir: PathBuf,
+) -> Result<(), String> {
+    // Convert directory to ext4 image
+    let cache_dir = args.cache_dir.as_deref();
+    let image_path = ext4img::get_cached_image(&root_dir, cache_dir)?;
+
+    eprintln!(
+        "Using ext4 image mode: {} (real Unix semantics)",
+        image_path.display()
+    );
+
+    let bind_specs = parse_bind_specs_with_root(&args.bind, Some(&root_dir))?;
+    let force_root_id = profile.force_root_id;
+    
+    // For ext4 mode, workdir handling is simpler since we chroot to the image root
+    let guest_workdir = args.work_dir.unwrap_or_else(|| PathBuf::from("/"));
+
+    // Open the image file for virtio-blk
+    let image = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&image_path)
+        .map_err(|e| format!("failed to open image {}: {e}", image_path.display()))?;
+
+    // Set up virtio-blk disk
+    let mut disk = LklDisk {
+        dev: std::ptr::null_mut(),
+        fd: image.as_raw_fd(),
+        ops: std::ptr::addr_of_mut!(lkl_dev_blk_ops),
+    };
+
+    boot_kernel(&args.cmdline)?;
+
+    let disk_id = unsafe { lkl_disk_add(&mut disk) };
+    if disk_id < 0 {
+        return Err(format!(
+            "lkl_disk_add failed: {} ({disk_id})",
+            err_text(disk_id as c_long)
+        ));
+    }
+
+    let sysnrs = detect_sysnrs()?;
+
+    // Mount the ext4 filesystem
+    let fs_type = CString::new("ext4").map_err(|e| e.to_string())?;
+    let opts = join_mount_opts(&args.mount_opt);
+    let opts_c = if opts.is_empty() {
+        None
+    } else {
+        Some(CString::new(opts).map_err(|e| e.to_string())?)
+    };
+
+    let mut mount_buf = vec![0u8; 256];
+    let mount_ret = unsafe {
+        lkl_mount_dev(
+            disk_id as u32,
+            0, // partition 0 = whole disk
+            fs_type.as_ptr(),
+            0,
+            opts_c
+                .as_ref()
+                .map(|v| v.as_ptr())
+                .unwrap_or(std::ptr::null()),
+            mount_buf.as_mut_ptr() as *mut c_char,
+            mount_buf.len() as u32,
+        )
+    };
+    if mount_ret < 0 {
+        return Err(format!(
+            "lkl_mount_dev failed: {} ({mount_ret})",
+            err_text(mount_ret)
+        ));
+    }
+
+    let mnt_ptr = mount_buf.as_ptr() as *const c_char;
+    let mountpoint = unsafe { CStr::from_ptr(mnt_ptr) }
+        .to_string_lossy()
+        .into_owned();
+
+    let chroot = CString::new(mountpoint).map_err(|e| e.to_string())?;
+    let chdir_work = CString::new(guest_workdir.to_string_lossy().as_ref()).map_err(|e| e.to_string())?;
+
+    unsafe {
+        ensure_ok(lkl_sys_chroot(sysnrs, chroot.as_ptr()), "lkl_sys_chroot")?;
+    }
+
+    if profile.recommended {
+        apply_recommended_mounts(sysnrs)?;
+    }
+    apply_bind_mounts(sysnrs, &bind_specs)?;
+
+    unsafe {
+        ensure_ok(lkl_sys_chdir(sysnrs, chdir_work.as_ptr()), "lkl_sys_chdir")?;
+    }
+    
+    let change_id = parse_change_id_spec(args.change_id.as_deref())?;
+    if args.root_id || force_root_id {
+        apply_guest_identity(sysnrs, true, None)?;
+    }
+    let id_override = change_id.map(|(uid, gid)| (uid as libc::uid_t, gid as libc::gid_t));
+
+    let (guest_cmd, guest_cmd_args) = split_commandline(&args.command)?;
+
+    if std::env::var_os("LEER_EXEC_PREFLIGHT").is_some() {
+        exec_preflight_mmap(sysnrs, &guest_cmd);
+    }
+
+    // For ext4 mode, don't normalize - we have real Unix semantics!
+    // Only normalize if explicitly requested with --normalize flag
+    let normalize = args.normalize;
+
+    seccomp::run_seccomp_forward_to_lkl(
+        sysnrs,
+        &guest_cmd,
+        &guest_cmd_args,
+        &args.forward_syscall,
+        Some(root_dir.as_path()),
+        None, // No host workdir in ext4 mode - we're inside the image
+        args.forward_verbose,
+        args.root_id || force_root_id,
+        id_override,
+        normalize,
     )
 }

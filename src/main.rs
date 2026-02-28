@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
+mod ext4img;
 mod host;
 mod image;
 mod lkl;
@@ -56,8 +57,19 @@ pub mod cli {
         pub change_id: Option<String>,
 
         /// Normalize displayed file modes to realistic Linux defaults in rooted host mode
+        /// Note: This is automatically enabled for virtio-fs, disabled for ext4-img mode
         #[arg(short = 'n', long = "normalize", default_value_t = false)]
         pub normalize: bool,
+
+        /// Cache directory for ext4 images (default: ~/.cache/leer/)
+        #[arg(long = "cache-dir")]
+        pub cache_dir: Option<PathBuf>,
+
+        /// Convert directory to ext4 image for real Unix semantics (caching enabled)
+        /// When enabled, directory is converted to ext4 and mounted via virtio-blk
+        /// giving real Unix ownership/permissions without normalization hacks
+        #[arg(short = 'E', long = "ext4", default_value_t = false)]
+        pub ext4: bool,
 
         /// Syscall names/numbers to forward (advanced)
         #[arg(long = "forward-syscall")]
@@ -66,6 +78,21 @@ pub mod cli {
         /// Print verbose forwarding diagnostics
         #[arg(long = "forward-verbose", default_value_t = false)]
         pub forward_verbose: bool,
+    }
+
+    #[derive(Args, Debug, Clone)]
+    pub struct ConvertArgs {
+        /// Source directory to convert
+        #[arg(short = 's', long = "source", required = true)]
+        pub source: PathBuf,
+
+        /// Output ext4 image path (default: <source>.ext4)
+        #[arg(short = 'o', long = "output")]
+        pub output: Option<PathBuf>,
+
+        /// Image size in MB (default: auto-calculated)
+        #[arg(short = 'S', long = "size-mb")]
+        pub size_mb: Option<u64>,
     }
 
     #[derive(Args, Debug, Clone)]
@@ -145,6 +172,8 @@ enum Commands {
     Host(cli::HostArgs),
     /// Boot a Linux kernel from a rootfs disk image
     Image(cli::ImageArgs),
+    /// Convert a directory to an ext4 image
+    Convert(cli::ConvertArgs),
 }
 
 fn main() -> ExitCode {
@@ -153,6 +182,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Commands::Host(args) => host::run_host(args),
         Commands::Image(args) => image::run_image(args),
+        Commands::Convert(args) => ext4img::run_convert(args),
     };
 
     match result {

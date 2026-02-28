@@ -1,0 +1,4 @@
+arch=x86_64
+runner=ubuntu-24.04
+commit=2d4956c2bbf5076058c45a26d8fcf476a5ea0b5b
+config_virtiofs=true
