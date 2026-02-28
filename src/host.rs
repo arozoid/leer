@@ -16,7 +16,7 @@ use crate::cli::HostArgs;
 use crate::lkl::{
     boot_kernel, ensure_ok, err_text, exec_preflight_mmap, join_mount_opts,
     resolve_guest_command_on_host, split_commandline, virtio_dev_cleanup, virtio_dev_setup,
-    virtio_req_complete, lkl_mount_proc, lkl_mount_sysfs, lkl_mount_devtmpfs,
+    virtio_req_complete,
 };
 use crate::seccomp;
 use crate::syscall::{
@@ -444,39 +444,12 @@ pub(crate) fn apply_recommended_mounts(sysnrs: &SysNrs) -> Result<(), String> {
     lkl_mkdir_p_best_effort(sysnrs, "/run", 0o755)?;
     lkl_mkdir_p_best_effort(sysnrs, "/tmp", 0o1777)?;
 
-    // Use LKL-specific mount helpers for virtual filesystems (requires CONFIG_PROC_FS,
-    // CONFIG_SYSFS, CONFIG_DEVTMPFS in LKL config)
-    // These are more efficient than generic mount syscall for LKL
-    
+    // Use standard mount syscalls for virtual filesystems.
     // `/proc` is fundamental for shell/userland behavior in recommended profiles.
     // If it cannot be mounted, fail explicitly instead of silently continuing.
-    unsafe {
-        let proc_fs = CString::new("proc").map_err(|e| e.to_string())?;
-        let proc_mnt = CString::new("/proc").map_err(|e| e.to_string())?;
-        let ret = lkl_mount_proc(proc_fs.as_ptr(), proc_mnt.as_ptr());
-        if ret < 0 {
-            return Err(format!("lkl_mount_proc failed: {} ({ret})", err_text(ret as c_long)));
-        }
-        eprintln!("lkl_mount_proc /proc succeeded");
-        
-        let sysfs_fs = CString::new("sysfs").map_err(|e| e.to_string())?;
-        let sysfs_mnt = CString::new("/sys").map_err(|e| e.to_string())?;
-        let ret = lkl_mount_sysfs(sysfs_fs.as_ptr(), sysfs_mnt.as_ptr());
-        if ret < 0 {
-            eprintln!("lkl_mount_sysfs failed: {} (continuing)", err_text(ret as c_long));
-        } else {
-            eprintln!("lkl_mount_sysfs /sys succeeded");
-        }
-        
-        let devtmpfs_fs = CString::new("devtmpfs").map_err(|e| e.to_string())?;
-        let devtmpfs_mnt = CString::new("/dev").map_err(|e| e.to_string())?;
-        let ret = lkl_mount_devtmpfs(devtmpfs_fs.as_ptr(), devtmpfs_mnt.as_ptr());
-        if ret < 0 {
-            eprintln!("lkl_mount_devtmpfs failed: {} (continuing)", err_text(ret as c_long));
-        } else {
-            eprintln!("lkl_mount_devtmpfs /dev succeeded");
-        }
-    }
+    mount_single(sysnrs, "proc", "/proc", Some("proc"), 0, None, true)?;
+    mount_single(sysnrs, "sysfs", "/sys", Some("sysfs"), 0, None, false)?;
+    mount_single(sysnrs, "devtmpfs", "/dev", Some("devtmpfs"), 0, None, false)?;
     mount_single(
         sysnrs,
         "devpts",

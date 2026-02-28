@@ -1,4 +1,4 @@
 arch=x86_64
 runner=ubuntu-24.04
-commit=26b737d35a08d78a8580fe4a46b2f7a791c03da8
-config_9p=true
+commit=2d4956c2bbf5076058c45a26d8fcf476a5ea0b5b
+config_virtiofs=true
