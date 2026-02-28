@@ -4,7 +4,7 @@ use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
-use crate::lkl::{close_fd, parse_elf_interp};
+use crate::lkl::{close_fd, parse_elf_interp, lkl_syscall6};
 use crate::syscall::{
     AT_FDCWD_LINUX, OpenHow, SysNrs, lkl_sys_chdir, lkl_sys_close, lkl_sys_dup, lkl_sys_dup3,
     lkl_sys_faccessat2, lkl_sys_fchmodat, lkl_sys_fchownat, lkl_sys_fcntl, lkl_sys_fstat,
@@ -13,7 +13,7 @@ use crate::syscall::{
     lkl_sys_mkdir, lkl_sys_mkdirat, lkl_sys_mount, lkl_sys_newfstatat, lkl_sys_openat,
     lkl_sys_openat2, lkl_sys_pread64, lkl_sys_read, lkl_sys_renameat2, lkl_sys_setfsgid,
     lkl_sys_setgid, lkl_sys_setgroups, lkl_sys_setregid, lkl_sys_setresgid, lkl_sys_setresuid,
-    lkl_sys_setreuid, lkl_sys_setuid, lkl_sys_umount2, lkl_sys_unlinkat, lkl_sys_write,
+    lkl_sys_setreuid, lkl_sys_setuid, lkl_sys_socket, lkl_sys_umount2, lkl_sys_unlinkat, lkl_sys_write,
 };
 
 #[cfg(target_arch = "x86_64")]
@@ -69,6 +69,18 @@ const HOST_NR_FCHOWNAT: i32 = 260;
 const HOST_NR_CLOSE: i32 = 3;
 #[cfg(target_arch = "x86_64")]
 const HOST_NR_SENDMSG: i32 = 46;
+#[cfg(target_arch = "x86_64")]
+const HOST_NR_SOCKET: i32 = 41;
+#[cfg(target_arch = "x86_64")]
+const HOST_NR_CONNECT: i32 = 42;
+#[cfg(target_arch = "x86_64")]
+const HOST_NR_BIND: i32 = 49;
+#[cfg(target_arch = "x86_64")]
+const HOST_NR_LISTEN: i32 = 50;
+#[cfg(target_arch = "x86_64")]
+const HOST_NR_ACCEPT: i32 = 43;
+#[cfg(target_arch = "x86_64")]
+const HOST_NR_ACCEPT4: i32 = 288;
 #[cfg(target_arch = "x86_64")]
 const HOST_NR_EXIT: i32 = 60;
 #[cfg(target_arch = "x86_64")]
@@ -182,6 +194,18 @@ const HOST_NR_FCHOWNAT: i32 = 54;
 const HOST_NR_CLOSE: i32 = 57;
 #[cfg(target_arch = "aarch64")]
 const HOST_NR_SENDMSG: i32 = 211;
+#[cfg(target_arch = "aarch64")]
+const HOST_NR_SOCKET: i32 = 198;
+#[cfg(target_arch = "aarch64")]
+const HOST_NR_CONNECT: i32 = 203;
+#[cfg(target_arch = "aarch64")]
+const HOST_NR_BIND: i32 = 200;
+#[cfg(target_arch = "aarch64")]
+const HOST_NR_LISTEN: i32 = 201;
+#[cfg(target_arch = "aarch64")]
+const HOST_NR_ACCEPT: i32 = 202;
+#[cfg(target_arch = "aarch64")]
+const HOST_NR_ACCEPT4: i32 = 242;
 #[cfg(target_arch = "aarch64")]
 const HOST_NR_EXIT: i32 = 93;
 #[cfg(target_arch = "aarch64")]
@@ -304,6 +328,121 @@ fn seccomp_ioctl_notif_addfd() -> u64 {
     iow::<libc::seccomp_notif_addfd>(b'!' as u32, 3)
 }
 
+/// Returns normalized (mode, uid, gid) for a given guest path.
+/// This is used to present consistent permissions regardless of host filesystem.
+fn normalized_permissions(path: &CStr) -> Option<(libc::mode_t, libc::uid_t, libc::gid_t)> {
+    let bytes = path.to_bytes();
+    let path_str = std::str::from_utf8(bytes).ok()?;
+    
+    // Common paths that should be normalized
+    
+    // /tmp - sticky bit + world writable
+    if path_str == "/tmp" {
+        return Some((0o1777, 0, 0));
+    }
+    
+    // /proc and /sys - read-only
+    if path_str == "/proc" || path_str == "/sys" {
+        return Some((0o555, 0, 0));
+    }
+    
+    // /home directory
+    if path_str == "/home" {
+        return Some((0o755, 0, 0));
+    }
+    
+    // /etc directory and special files
+    if path_str == "/etc" {
+        return Some((0o755, 0, 0));
+    }
+    if path_str == "/etc/passwd" {
+        return Some((0o644, 0, 0));
+    }
+    if path_str == "/etc/shadow" {
+        return Some((0o640, 0, 42)); // root:shadow
+    }
+    
+    // /dev special files
+    if path_str == "/dev/null" || path_str == "/dev/zero" ||
+       path_str == "/dev/random" || path_str == "/dev/urandom" {
+        return Some((0o666, 0, 0));
+    }
+    if path_str == "/dev/tty" {
+        return Some((0o666, 0, 5)); // root:tty
+    }
+    if path_str == "/dev/console" {
+        return Some((0o600, 0, 0));
+    }
+    
+    // System binary directories
+    let is_bin_dir = path_str == "/bin" || path_str == "/usr/bin" ||
+                     path_str == "/sbin" || path_str == "/usr/sbin" ||
+                     path_str == "/usr/local/bin" || path_str == "/usr/local/sbin";
+    
+    if is_bin_dir {
+        return Some((0o755, 0, 0));
+    }
+    
+    // Check if path is in a binary directory (for binaries)
+    let in_bin_dir = path_str.starts_with("/bin/") ||
+                     path_str.starts_with("/usr/bin/") ||
+                     path_str.starts_with("/sbin/") ||
+                     path_str.starts_with("/usr/sbin/") ||
+                     path_str.starts_with("/usr/local/bin/") ||
+                     path_str.starts_with("/usr/local/sbin/");
+    
+    if in_bin_dir {
+        // Known setuid/setgid binaries
+        let is_setuid_binary = path_str.ends_with("/passwd") ||
+                               path_str.ends_with("/su") ||
+                               path_str.ends_with("/sudo") ||
+                               path_str.ends_with("/mount") ||
+                               path_str.ends_with("/umount") ||
+                               path_str.ends_with("/ping") ||
+                               path_str.ends_with("/ping6") ||
+                               path_str.ends_with("/newgrp") ||
+                               path_str.ends_with("/chfn") ||
+                               path_str.ends_with("/chsh") ||
+                               path_str.ends_with("/gpasswd");
+        
+        if is_setuid_binary {
+            return Some((0o4755, 0, 0)); // setuid root
+        }
+        
+        // Regular binaries
+        return Some((0o755, 0, 0));
+    }
+    
+    // User home directories under /home
+    if path_str.starts_with("/home/") {
+        // The home directory itself (e.g., /home/user)
+        let components: Vec<&str> = path_str.split('/').collect();
+        if components.len() == 3 && !components[2].is_empty() {
+            // This is a direct child of /home - treat as user home
+            // Use a hash of the username to generate consistent uid > 1000
+            let username = components[2];
+            let uid = 1000 + (hash_username(username) % 64000);
+            return Some((0o700, uid, uid));
+        }
+    }
+    
+    // /root home directory
+    if path_str == "/root" {
+        return Some((0o700, 0, 0));
+    }
+    
+    None
+}
+
+/// Simple hash function for generating consistent UIDs from usernames
+fn hash_username(name: &str) -> libc::uid_t {
+    let mut hash: u32 = 5381;
+    for byte in name.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(byte as u32);
+    }
+    hash as libc::uid_t
+}
+
 fn syscall_name_from_nr(nr: i32) -> &'static str {
     if nr == HOST_NR_OPENAT {
         "openat"
@@ -335,6 +474,18 @@ fn syscall_name_from_nr(nr: i32) -> &'static str {
         "fchdir"
     } else if nr == HOST_NR_GETCWD {
         "getcwd"
+    } else if nr == HOST_NR_SOCKET {
+        "socket"
+    } else if nr == HOST_NR_CONNECT {
+        "connect"
+    } else if nr == HOST_NR_BIND {
+        "bind"
+    } else if nr == HOST_NR_LISTEN {
+        "listen"
+    } else if nr == HOST_NR_ACCEPT {
+        "accept"
+    } else if nr == HOST_NR_ACCEPT4 {
+        "accept4"
     } else if nr == HOST_NR_EXECVE {
         "execve"
     } else if nr == HOST_NR_EXECVEAT {
@@ -996,7 +1147,12 @@ fn forward_open_legacy(
     seccomp_value_reply(fd as i64)
 }
 
-fn forward_fstat(req: &libc::seccomp_notif, sysnrs: &SysNrs, table: &ForwardFdTable) -> SeccompDispatch {
+fn forward_fstat(
+    req: &libc::seccomp_notif,
+    sysnrs: &SysNrs,
+    table: &ForwardFdTable,
+    _normalize: bool,
+) -> SeccompDispatch {
     let fd = to_c_long_arg(req.data.args[0]);
     let Some(lkl_fd) = table.get_lkl(fd) else {
         return SeccompDispatch::Continue;
@@ -1028,6 +1184,7 @@ fn forward_newfstatat(
     sysnrs: &SysNrs,
     table: &ForwardFdTable,
     host_root: Option<&Path>,
+    normalize: bool,
 ) -> SeccompDispatch {
     let pid = req.pid as libc::pid_t;
     let dirfd_raw = to_dirfd_arg(req.data.args[0]);
@@ -1065,6 +1222,19 @@ fn forward_newfstatat(
     if ret < 0 {
         return seccomp_errno_reply((-ret) as i32);
     }
+    
+    // Apply normalization if enabled
+    if normalize {
+        unsafe {
+            let stat_ref = stat_buf.assume_init_mut();
+            if let Some((mode, uid, gid)) = normalized_permissions(path.as_c_str()) {
+                stat_ref.st_mode = (stat_ref.st_mode & libc::S_IFMT) | (mode & !libc::S_IFMT);
+                stat_ref.st_uid = uid;
+                stat_ref.st_gid = gid;
+            }
+        }
+    }
+    
     let stat_bytes = unsafe {
         std::slice::from_raw_parts(
             stat_buf.as_ptr().cast::<u8>(),
@@ -1578,6 +1748,7 @@ fn forward_stat_legacy(
     sysnrs: &SysNrs,
     nofollow: bool,
     host_root: Option<&Path>,
+    normalize: bool,
 ) -> SeccompDispatch {
     let pid = req.pid as libc::pid_t;
     let path = match read_remote_c_string(pid, req.data.args[0], FORWARD_MAX_PATH_LEN) {
@@ -1606,6 +1777,19 @@ fn forward_stat_legacy(
     if ret < 0 {
         return seccomp_errno_reply((-ret) as i32);
     }
+    
+    // Apply normalization if enabled
+    if normalize {
+        unsafe {
+            let stat_ref = stat_buf.assume_init_mut();
+            if let Some((mode, uid, gid)) = normalized_permissions(path.as_c_str()) {
+                stat_ref.st_mode = (stat_ref.st_mode & libc::S_IFMT) | (mode & !libc::S_IFMT);
+                stat_ref.st_uid = uid;
+                stat_ref.st_gid = gid;
+            }
+        }
+    }
+    
     let stat_bytes = unsafe {
         std::slice::from_raw_parts(
             stat_buf.as_ptr().cast::<u8>(),
@@ -2194,14 +2378,15 @@ fn dispatch_forward_syscall(
     listener_fd: RawFd,
     root_identity: bool,
     id_override: Option<(libc::uid_t, libc::gid_t)>,
+    normalize: bool,
 ) -> SeccompDispatch {
     let nr = req.data.nr;
     if verbose {
         eprintln!("seccomp notify: pid={} nr={} ({})", req.pid, nr, syscall_name_from_nr(nr));
     }
     match nr {
-        HOST_NR_STAT => forward_stat_legacy(req, sysnrs, false, host_root),
-        HOST_NR_LSTAT => forward_stat_legacy(req, sysnrs, true, host_root),
+        HOST_NR_STAT => forward_stat_legacy(req, sysnrs, false, host_root, normalize),
+        HOST_NR_LSTAT => forward_stat_legacy(req, sysnrs, true, host_root, normalize),
         HOST_NR_ACCESS => forward_access_legacy(req, sysnrs, host_root),
         HOST_NR_MKDIR => forward_mkdir_legacy(req, sysnrs, host_root),
         HOST_NR_RMDIR => forward_rmdir_legacy(req, sysnrs, host_root),
@@ -2212,8 +2397,8 @@ fn dispatch_forward_syscall(
         HOST_NR_OPEN => forward_open_legacy(req, sysnrs, table, host_root, listener_fd),
         HOST_NR_OPENAT => forward_openat(req, sysnrs, table, host_root, listener_fd),
         HOST_NR_OPENAT2 => forward_openat2(req, sysnrs, table, host_root, listener_fd),
-        HOST_NR_FSTAT => forward_fstat(req, sysnrs, table),
-        HOST_NR_NEWFSTATAT => forward_newfstatat(req, sysnrs, table, host_root),
+        HOST_NR_FSTAT => forward_fstat(req, sysnrs, table, normalize),
+        HOST_NR_NEWFSTATAT => forward_newfstatat(req, sysnrs, table, host_root, normalize),
         HOST_NR_FACCESSAT2 => forward_faccessat2(req, sysnrs, table, host_root),
         HOST_NR_GETDENTS64 => forward_getdents64(req, sysnrs, table),
         HOST_NR_GETDENTS => forward_getdents(req, sysnrs, table),
@@ -2309,6 +2494,40 @@ fn dispatch_forward_syscall(
         HOST_NR_PREAD64 => forward_read_like(req, sysnrs, table, true),
         HOST_NR_WRITE => forward_write(req, sysnrs, table),
         HOST_NR_LSEEK => forward_lseek(req, sysnrs, table),
+        HOST_NR_SOCKET => {
+            let domain = to_c_long_arg(req.data.args[0]);
+            let sock_type = to_c_long_arg(req.data.args[1]);
+            let protocol = to_c_long_arg(req.data.args[2]);
+            let ret = unsafe { lkl_sys_socket(sysnrs, domain, sock_type, protocol) };
+            if ret < 0 {
+                seccomp_errno_reply((-ret) as i32)
+            } else {
+                let fd = table.insert(ret, false);
+                seccomp_value_reply(fd as i64)
+            }
+        }
+        HOST_NR_CONNECT => {
+            let fd = to_c_long_arg(req.data.args[0]);
+            if let Some(lkl_fd) = table.get_lkl(fd) {
+                let pid = req.pid as libc::pid_t;
+                let addr_ptr = req.data.args[1];
+                let len = match to_usize_arg(req.data.args[2]) {
+                    Ok(v) => v,
+                    Err(errno) => return seccomp_errno_reply(errno),
+                };
+                if addr_ptr == 0 {
+                    return seccomp_errno_reply(libc::EFAULT);
+                }
+                let mut buf = vec![0u8; len];
+                if let Err(errno) = process_vm_read_exact(pid, addr_ptr, &mut buf) {
+                    return seccomp_errno_reply(errno);
+                }
+                let ret = unsafe { lkl_syscall6(libc::SYS_connect as libc::c_long, lkl_fd, buf.as_ptr() as libc::c_long, len as libc::c_long, 0, 0, 0) };
+                seccomp_from_lkl_ret(ret)
+            } else {
+                SeccompDispatch::Continue
+            }
+        }
         HOST_NR_EXECVE | HOST_NR_EXECVEAT => SeccompDispatch::Continue,
         _ => SeccompDispatch::Continue,
     }
@@ -2785,6 +3004,7 @@ fn supervise_seccomp_forward_to_lkl(
     verbose: bool,
     root_identity: bool,
     id_override: Option<(libc::uid_t, libc::gid_t)>,
+    normalize: bool,
 ) -> Result<i32, String> {
     let mut table = ForwardFdTable::new();
     loop {
@@ -2859,6 +3079,7 @@ fn supervise_seccomp_forward_to_lkl(
                 listener_fd,
                 root_identity,
                 id_override,
+                normalize,
             );
         let resp = seccomp_response_for(req.id, dispatch);
         notify_send(listener_fd, &resp)?;
@@ -2875,6 +3096,7 @@ pub(crate) fn run_seccomp_forward_to_lkl(
     forward_verbose: bool,
     root_identity: bool,
     id_override: Option<(libc::uid_t, libc::gid_t)>,
+    normalize: bool,
 ) -> Result<(), String> {
     let _ = sysnrs;
     if host_root.is_none() && host_cmd.starts_with('/') && !Path::new(host_cmd).exists() {
@@ -2893,6 +3115,7 @@ pub(crate) fn run_seccomp_forward_to_lkl(
         forward_verbose,
         root_identity,
         id_override,
+        normalize,
     );
     close_fd(listener_fd);
     let exit_code = match supervised {

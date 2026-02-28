@@ -28,6 +28,11 @@ unsafe extern "C" {
     pub(crate) fn lkl_strerror(err: c_int) -> *const c_char;
     pub(crate) fn lkl_syscall(no: c_long, params: *const c_long) -> c_long;
 
+    // LKL-specific mount helpers (available when CONFIG_PROC_FS, CONFIG_SYSFS, CONFIG_DEVTMPFS are enabled)
+    pub(crate) fn lkl_mount_proc(fs: *const c_char, mnt: *const c_char) -> c_int;
+    pub(crate) fn lkl_mount_sysfs(fs: *const c_char, mnt: *const c_char) -> c_int;
+    pub(crate) fn lkl_mount_devtmpfs(fs: *const c_char, mnt: *const c_char) -> c_int;
+
     pub(crate) fn lkl_disk_add(disk: *mut LklDisk) -> c_int;
     pub(crate) fn lkl_mount_dev(
         disk_id: u32,

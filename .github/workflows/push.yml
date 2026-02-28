@@ -130,8 +130,12 @@ jobs:
           echo "Patching config file: ${CONFIG_FILE}"
           linux/scripts/config --file "${CONFIG_FILE}" \
             -e VIRTIO_FS \
-            -e FUSE_FS
-          for sym in VIRTIO_FS FUSE_FS; do
+            -e FUSE_FS \
+            -e PROC_FS \
+            -e SYSFS \
+            -e DEVTMPFS \
+            -e DEVTMPFS_MOUNT
+          for sym in VIRTIO_FS FUSE_FS PROC_FS SYSFS DEVTMPFS DEVTMPFS_MOUNT; do
             grep -q "^CONFIG_${sym}=y$" "${CONFIG_FILE}" || {
               echo "Expected CONFIG_${sym}=y in ${CONFIG_FILE}"
               exit 1

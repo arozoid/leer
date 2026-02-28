@@ -114,5 +114,6 @@ pub(crate) fn run_image(args: ImageArgs) -> Result<(), String> {
         args.forward_verbose,
         args.root_id || profile.force_root_id,
         None,
+        args.normalize,
     )
 }

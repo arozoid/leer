@@ -31,6 +31,7 @@ pub(crate) struct SysNrs {
     openat: c_long,
     openat2: c_long,
     fcntl: c_long,
+    socket: c_long,
     dup: c_long,
     dup3: c_long,
     close: c_long,
@@ -81,6 +82,7 @@ pub(crate) const SYSNRS_X86_64: SysNrs = SysNrs {
     openat: 257,
     openat2: 437,
     fcntl: 72,
+    socket: 41,
     dup: 32,
     dup3: 292,
     close: 3,
@@ -131,6 +133,7 @@ pub(crate) const SYSNRS_GENERIC: SysNrs = SysNrs {
     openat: 56,
     openat2: 437,
     fcntl: 25,
+    socket: 198,
     dup: 23,
     dup3: 24,
     close: 57,
@@ -209,6 +212,15 @@ pub(crate) unsafe fn lkl_sys_openat2(
 
 pub(crate) unsafe fn lkl_sys_dup(sys: &SysNrs, fd: c_long) -> c_long {
     unsafe { lkl_syscall6(sys.dup, fd, 0, 0, 0, 0, 0) }
+}
+
+pub(crate) unsafe fn lkl_sys_socket(
+    sys: &SysNrs,
+    domain: c_long,
+    sock_type: c_long,
+    protocol: c_long,
+) -> c_long {
+    unsafe { lkl_syscall6(sys.socket, domain, sock_type, protocol, 0, 0, 0) }
 }
 
 pub(crate) unsafe fn lkl_sys_dup3(sys: &SysNrs, oldfd: c_long, newfd: c_long, flags: c_long) -> c_long {

@@ -55,6 +55,10 @@ pub mod cli {
         #[arg(long = "change-id", value_name = "UID:GID")]
         pub change_id: Option<String>,
 
+        /// Normalize displayed file modes to realistic Linux defaults in rooted host mode
+        #[arg(short = 'n', long = "normalize", default_value_t = false)]
+        pub normalize: bool,
+
         /// Syscall names/numbers to forward (advanced)
         #[arg(long = "forward-syscall")]
         pub forward_syscall: Vec<String>,
@@ -113,6 +117,10 @@ pub mod cli {
         /// Change identity to explicit uid:gid inside the guest
         #[arg(long = "change-id", value_name = "UID:GID")]
         pub change_id: Option<String>,
+
+        /// Normalize displayed file modes to realistic Linux defaults in rooted host mode
+        #[arg(short = 'n', long = "normalize", default_value_t = false)]
+        pub normalize: bool,
 
         /// Syscall names/numbers to forward (advanced)
         #[arg(long = "forward-syscall")]
